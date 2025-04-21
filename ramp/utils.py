@@ -18,8 +18,8 @@ import os
 from data import H5EventHandle
 
 
-all_times = []
-class Timer:
+old_times = []
+class OldTimer:
     def __init__(self, name, enabled=True):
         self.name = name
         self.enabled = enabled
@@ -33,13 +33,13 @@ class Timer:
             self.start.record()
 
     def __exit__(self, type, value, traceback):
-        global all_times
+        global old_times
         if self.enabled:
             self.end.record()
             torch.cuda.synchronize()
 
             elapsed = self.start.elapsed_time(self.end)
-            all_times.append(elapsed)
+            old_times.append(elapsed)
             print(self.name, elapsed)
 
 

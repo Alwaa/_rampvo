@@ -274,7 +274,7 @@ class Ramp_vo:
         self.remove_factors(to_remove)
 
     def update(self):
-        with Timer("other", enabled=self.enable_timing):
+        with OldTimer("other", enabled=self.enable_timing):
             coords = self.reproject()
 
             with autocast:
@@ -295,7 +295,7 @@ class Ramp_vo:
 
             self.last_weight = weight.clone()
 
-        with Timer("BA", enabled=self.enable_timing):
+        with OldTimer("BA", enabled=self.enable_timing):
             t0 = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
             t0 = max(t0, 1)
 
