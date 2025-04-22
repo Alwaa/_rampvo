@@ -14,6 +14,7 @@ from .extractor import (
     MultiScaleMergerDoubleNet,
 )
 from .utils import (
+    Timer,
     get_coords_from_topk_events,
     coords_grid_with_index,
     preprocess_input,
@@ -71,20 +72,26 @@ class Update(nn.Module):
 
         # net: the hidden state (size=#edges x 384)
         # inp: corr:
-        net = net + inp + self.corr(corr)
-        net = self.norm(net)
+        with Timer("Update.NetUpdate.corr", enabled=True):
+            net = net + inp + self.corr(corr)
+            net = self.norm(net)
 
-        ix, jx = fastba.neighbors(kk, jj)
-        mask_ix = (ix >= 0).float().reshape(1, -1, 1)
-        mask_jx = (jx >= 0).float().reshape(1, -1, 1)
+        with Timer("Update.NetUpdate.fasba", enabled=True):
+            ix, jx = fastba.neighbors(kk, jj)
+            mask_ix = (ix >= 0).float().reshape(1, -1, 1)
+            mask_jx = (jx >= 0).float().reshape(1, -1, 1)
 
-        net = net + self.c1(mask_ix * net[:, ix])
-        net = net + self.c2(mask_jx * net[:, jx])
+        with Timer("Update.NetUpdate.c1c2", enabled=True):
+            net = net + self.c1(mask_ix * net[:, ix])
+            net = net + self.c2(mask_jx * net[:, jx])
 
-        net = net + self.agg_kk(net, kk)
-        net = net + self.agg_ij(net, ii * 12345 + jj)
+        with Timer("Update.NetUpdate.agg", enabled=True):
+            net = net + self.agg_kk(net, kk)
+            net = net + self.agg_ij(net, ii * 12345 + jj)
 
-        net = self.gru(net)
+
+        with Timer("Update.NetUpdate.gru", enabled=True):
+            net = self.gru(net)
 
         # d: trajectory update | w: confidence score
         return net, (self.d(net), self.w(net), None)
@@ -260,12 +267,14 @@ class VONet(nn.Module):
 
         # fmap: extracted feature map, gmap:, imap:,
         # patches: depths patches, ix: image indices (img 1, img 2, ...)
-        fmap, gmap, imap, patches, ix = self.patchify(
-            input_=input_,
-            disps=disps,
-            reinit_hidden=True,
-            event_bias=self.EVENT_BIAS,
-        )
+
+        with Timer("_Patchify", enabled=True):
+            fmap, gmap, imap, patches, ix = self.patchify(
+                input_=input_,
+                disps=disps,
+                reinit_hidden=True,
+                event_bias=self.EVENT_BIAS,
+            )
 
         corr_fn = CorrBlock(fmap, gmap)
 
@@ -341,38 +350,41 @@ class VONet(nn.Module):
 
             coords = pops.transform(Gs, patches, intrinsics, ii, jj, kk)
             coords1 = coords.permute(0, 1, 4, 2, 3).contiguous()
-
-            corr = corr_fn(kk, jj, coords1)
-            net, (delta, weight, _) = self.update(net, imap[:, kk], corr, None, ii, jj, kk)
+            with Timer("Update.NetUpdate.InnerCorr", enabled=True):
+                corr = corr_fn(kk, jj, coords1)
+            with Timer("Update.NetUpdate.InnerUpdate", enabled=True):
+                net, (delta, weight, _) = self.update(net, imap[:, kk], corr, None, ii, jj, kk)
 
             lmbda = 1e-4
             target = coords[..., p // 2, p // 2, :] + delta
 
             ep = 10
             for itr in range(2):
-                Gs, patches = BA(
-                    Gs,
-                    patches,
-                    intrinsics,
-                    target,
-                    weight,
-                    lmbda,
-                    ii,
-                    jj,
-                    kk,
-                    bounds,
-                    ep=ep,
-                    fixedp=1,
-                    structure_only=structure_only,
-                )
+                with Timer("Update.NetUpdate.BA", enabled=True):
+                    Gs, patches = BA(
+                        Gs,
+                        patches,
+                        intrinsics,
+                        target,
+                        weight,
+                        lmbda,
+                        ii,
+                        jj,
+                        kk,
+                        bounds,
+                        ep=ep,
+                        fixedp=1,
+                        structure_only=structure_only,
+                    )
 
             dij = (ii - jj).abs()
             k = (dij > 0) & (dij <= 2)
 
-            coords = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
-            coords_gt, valid, _ = pops.transform(
-                Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True
-            )
+            with Timer("Update.NetUpdate.Transforms", enabled=True):
+                coords = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
+                coords_gt, valid, _ = pops.transform(
+                    Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True
+                )
 
             traj.append((valid, coords, coords_gt, Gs[:, :n], Ps[:, :n]))
         return traj

@@ -100,6 +100,8 @@ class TartanEvent(RGBDDataset):
         self.i0, self.i1 = {}, {}
         all_indices = deepcopy(self.dataset_index)
 
+        all_indices = [] # FIX for not having all datasets:&
+
         for scene_id_path in self.validation_index:
             all_indices.append(scene_id_path)
 

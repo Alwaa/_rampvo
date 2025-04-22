@@ -1,6 +1,7 @@
+import gc
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "8"
+#os.environ["CUDA_VISIBLE_DEVICES"] = "8"
 
 import sys
 import glob
@@ -29,8 +30,10 @@ from utils.eval_utils import (
 )
 from data import H5EventHandle
 from ramp.utils import (
+    Timer,
     input_resize,
     normalize_image,
+    print_timing_summary,
     save_output_for_COLMAP
 )
 from ramp.config import cfg as VO_cfg
@@ -135,6 +138,7 @@ def data_loader_all_events(
         )
 
         frame_ind = corresponding_frame_indices[i]
+
         imfile = image_files[frame_ind]
         image = torchvision.io.read_image(imfile)
         image = normalize_image(images=image, norm_img_to=norm_to)
@@ -152,6 +156,20 @@ def data_loader_all_events(
     # frame_indices = list(set(corresponding_frame_indices))
     # Check this masking operation
     frame_indices = list(set(corresponding_frame_indices[masks]))
+    
+    del masks
+    del event
+    del corr_events_timestamps
+    del timestamps
+    del corresponding_timestamps
+    del TartanEvent_loader
+    del time_vicinity
+    del corresponding_events_indices
+    del corresponding_frame_indices
+    del imfiles
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return data_list, frame_indices
 
 
@@ -182,7 +200,7 @@ def resize_input(image, events):
 
 
 @torch.no_grad()
-def run_pose_pred(cfg_VO, network, eval_cfg, data_list, t_horizon_to_pred, t_to_pred, deg_approx=4):
+def run_pose_pred(cfg_VO, network, eval_cfg, data_list, t_horizon_to_pred, t_to_pred, deg_approx=4, enable_timing = False):
     """Run the slam on the given data_list using pose prediction algorithm 
        for bootstrapping and return the trajectory and timestamps. 
        Pose prediction typically slows down VO frequency.
@@ -201,36 +219,43 @@ def run_pose_pred(cfg_VO, network, eval_cfg, data_list, t_horizon_to_pred, t_to_
         tstamps: the timestamps of the estimated trajectory
     """
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
-    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg)
+    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
     for t, (image, events, intrinsics, mask) in enumerate(tqdm(_data_iterator(data_list))):
+        with Timer("SLAM", enabled=enable_timing):
+            image, events = resize_input(image, events)
 
-        image, events = resize_input(image, events)
+            if t < t_to_pred or t_to_pred < 0:
+                with Timer("InitTrack", enabled=enable_timing):
+                    slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
+                    last_keyframe_number = slam.n
 
-        if t < t_to_pred or t_to_pred < 0:
-            slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
-            last_keyframe_number = slam.n
-        if t == t_to_pred and t_to_pred > 0:
-            for _ in range(12):
-                slam.update()
-        if t >= t_to_pred and t_to_pred > 0:
-            sec_to_pred_future = t - t_to_pred
-            slam.predict_future_pose(
-                    last_keyframe_number=last_keyframe_number,
-                    sec_to_pred_future=sec_to_pred_future, 
-                    abs_time=t,
-                    deg=deg_approx,
-                    )
-        if t == t_to_pred + t_horizon_to_pred:
-            break
+            if t == t_to_pred and t_to_pred > 0:
+                with Timer("TPredUpdt", enabled=enable_timing):
+                    for _ in range(12):
+                        slam.update()
 
-    for _ in range(12):
-        slam.update()
+            if t >= t_to_pred and t_to_pred > 0:
+                with Timer("FuturePred", enabled=enable_timing):
+                    sec_to_pred_future = t - t_to_pred
+                    slam.predict_future_pose(
+                            last_keyframe_number=last_keyframe_number,
+                            sec_to_pred_future=sec_to_pred_future, 
+                            abs_time=t,
+                            deg=deg_approx,
+                            )
+                
+            if t == t_to_pred + t_horizon_to_pred:
+                break
+    
+    with Timer("FinalUpdates", enabled=enable_timing):
+        for _ in range(12):
+            slam.update()
 
     return slam.terminate()
 
 
 @torch.no_grad()
-def run(cfg_VO, network, eval_cfg, data_list):
+def run(cfg_VO, network, eval_cfg, data_list, enable_timing = False):
     """Run the slam on the given data_list and return the trajectory and timestamps
 
     Args:
@@ -244,15 +269,18 @@ def run(cfg_VO, network, eval_cfg, data_list):
         tstamps: the timestamps of the estimated trajectory
     """
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
-    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg)
+    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
     for t, (image, events, intrinsics, mask) in enumerate(
         tqdm(_data_iterator(data_list))
     ):
         image, events = resize_input(image, events)
-        slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
-
-    for _ in range(12):
-        slam.update()
+        with Timer("SLAM", enabled=enable_timing):
+            slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
+    
+    with Timer("FinalUpdates", enabled=enable_timing):
+        for _ in range(12):
+            with Timer("UpdateFinal", enabled=enable_timing):
+                slam.update()
        
     points = slam.points_.cpu().numpy()[:slam.m]
     colors = slam.colors_.view(-1, 3).cpu().numpy()[:slam.m]
@@ -261,25 +289,26 @@ def run(cfg_VO, network, eval_cfg, data_list):
 
 
 def evaluate_sequence(
-    config_VO, net, eval_cfg, data_list, traj_ref, use_pose_pred, img_timestamps,
+    config_VO, net, eval_cfg, data_list, traj_ref, use_pose_pred, img_timestamps, enable_timing = False
 ):
     if use_pose_pred:
         # Tune starting_t_to_pred and t_horizon_to_pred accordingly for your dataset
         starting_t_to_pred = traj_ref.num_poses // 2
         t_horizon_to_pred = traj_ref.num_poses - starting_t_to_pred
         
-        traj_est, tstamps = run_pose_pred(
+        traj_est, _tstamps = run_pose_pred(
             cfg_VO=config_VO,
             network=net,
             eval_cfg=eval_cfg,
             data_list=data_list,
             t_to_pred=starting_t_to_pred,
             t_horizon_to_pred=t_horizon_to_pred,
-            deg_approx=4,
+            deg_approx=4, 
+            enable_timing=enable_timing,
         )
     else:
-        traj_est, tstamps, points, colors = run(
-            cfg_VO=config_VO, network=net, eval_cfg=eval_cfg, data_list=data_list
+        traj_est, _tstamps, points, colors = run(
+            cfg_VO=config_VO, network=net, eval_cfg=eval_cfg, data_list=data_list, enable_timing=enable_timing
         )
 
     traj_est_ = PoseTrajectory3D(
@@ -309,12 +338,16 @@ def evaluate_sequence(
         ate_score = 1000
         rot_score = [1000, 1000, 1000]
 
-    return ate_score, rot_score, traj_est, traj_ref
+    del _tstamps
+    del traj_est_
+    del points
+    del colors
 
+    return ate_score, rot_score, traj_est, traj_ref
 
 @torch.no_grad()
 def evaluate(
-    net, trials=1, downsample_fact=1, config_VO=None, eval_cfg=None, results_path=None
+    net, trials=1, downsample_fact=1, config_VO=None, eval_cfg=None, results_path=None, enable_timing = False
 ):
     test_ = eval_cfg["data_loader"]["test"]
     train_ = eval_cfg["data_loader"]["train"]["args"]
@@ -367,7 +400,7 @@ def evaluate(
         else:
             raise NotImplementedError("dataset not supported")
 
-        data_list, frame_indices = data_loader_all_events(
+        scene_data_list, scene_frame_indices = data_loader_all_events(
             config=eval_cfg,
             full_scene=scene,
             downsample_fact=downsample_fact,
@@ -379,10 +412,11 @@ def evaluate(
             config_VO=config_VO,
             net=net,
             eval_cfg=eval_cfg,
-            data_list=data_list,
+            data_list=scene_data_list,
             traj_ref=traj_ref,
             use_pose_pred=use_pose_pred,
-            img_timestamps=img_timestamps[frame_indices],
+            img_timestamps=img_timestamps[scene_frame_indices],
+            enable_timing = enable_timing,
         )
         save_res = partial(save_results, scene=scene_name, eval_type="full_data")
 
@@ -400,6 +434,30 @@ def evaluate(
         if results_path is not None:
             with open(results_path, "w") as json_file:
                 json.dump(results, json_file, indent=4)
+        
+        # cleanup memory
+        print("\nCleaning memory...\n")
+        print(len(scene_data_list))
+        while not len(scene_data_list) == 0:
+            a, ev, b, c = scene_data_list.pop()
+            del ev # Big memory hog
+            del a
+            del b
+            del c   
+        print(len(scene_data_list)) 
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        scene_data_list.clear()
+        scene_frame_indices.clear()
+        del scene
+        del scene_data_list
+        del scene_frame_indices
+        del traj_ref
+        del traj_est
+        gc.collect()
+        torch.cuda.empty_cache()
+
 
     if results_path is not None:
         with open(results_path, "w") as json_file:
@@ -420,6 +478,7 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--downsample_fact", type=int, default=1)
     parser.add_argument("--results_path", type=str, default=None)
+    parser.add_argument("--timeit", action='store_true')
 
     args = parser.parse_args()
 
@@ -427,6 +486,7 @@ if __name__ == "__main__":
     eval_cfg = json.load(open(args.config_eval))
 
     print("Running evaluation...")
+    print(args)
 
     results = evaluate(
         config_VO=VO_cfg,
@@ -435,6 +495,10 @@ if __name__ == "__main__":
         trials=args.trials,
         downsample_fact=args.downsample_fact,
         results_path=args.results_path,
+        enable_timing=args.timeit
     )
     for k in results:
         print(k, results[k])
+    
+    if args.timeit:
+        print_timing_summary()

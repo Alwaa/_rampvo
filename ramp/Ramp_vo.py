@@ -25,7 +25,7 @@ Id = SE3.Identity(1, device="cuda")
 
 
 class Ramp_vo:
-    def __init__(self, cfg, network, train_cfg, ht=480, wd=640):
+    def __init__(self, cfg, network, train_cfg, ht=480, wd=640, enable_timing = False):
         self.cfg = cfg
         self.event_bias = train_cfg["event_bias"]
         self.train_cfg = train_cfg
@@ -37,7 +37,7 @@ class Ramp_vo:
 
         self.load_weights(network)
         self.is_initialized = False
-        self.enable_timing = False
+        self.enable_timing = enable_timing
         
         self.n = 0      # number of frames
         self.m = 0      # number of patches
@@ -103,7 +103,7 @@ class Ramp_vo:
     def load_weights(self, network):
         # load network from checkpoint file
         if isinstance(network, str):
-            checkpoint = torch.load(network)
+            checkpoint = torch.load(network, weights_only=False)
 
             if checkpoint.get('model_state_dict'):
                 state_dict = checkpoint['model_state_dict']
@@ -274,12 +274,16 @@ class Ramp_vo:
         self.remove_factors(to_remove)
 
     def update(self):
-        with OldTimer("other", enabled=self.enable_timing):
+        with Timer("Update.ReProj", enabled=self.enable_timing):
             coords = self.reproject()
 
-            with autocast:
+        with autocast: 
+            with Timer("Update.Corr", enabled=self.enable_timing):
                 corr = self.corr(coords)
+
+            with Timer("Update.Ctx", enabled=self.enable_timing):
                 ctx = self.imap[:,self.kk % (self.M * self.mem)]
+            with Timer("Update.NetUpdate", enabled=self.enable_timing):
                 self.net, (delta, weight, _) = \
                     self.network.update(self.net, ctx, corr, None, self.ii, self.jj, self.kk)
 
@@ -288,14 +292,16 @@ class Ramp_vo:
             weight = weight.float()
             target = coords[...,self.P//2,self.P//2] + delta.float()
 
-            weight = filter_features(confidences=weight, 
-                                     target=target, 
-                                     data_shape=(self.ht//4, self.wd//4), 
-                                    )
 
-            self.last_weight = weight.clone()
+            with Timer("Update.FilterFeat", enabled=self.enable_timing):
+                weight = filter_features(confidences=weight, 
+                                        target=target, 
+                                        data_shape=(self.ht//4, self.wd//4), 
+                                        )
 
-        with OldTimer("BA", enabled=self.enable_timing):
+                self.last_weight = weight.clone()
+
+        with Timer("Update.BA", enabled=self.enable_timing):
             t0 = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
             t0 = max(t0, 1)
 
