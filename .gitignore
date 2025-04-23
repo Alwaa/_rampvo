@@ -32,11 +32,12 @@ thirdparty/*
 Others/
 trajectory_visualization
 trajectory_evaluation
+colmap_saving
 DEBUG/
 scripts/
-checkpoints
-datasets
-datasets_pickle
+checkpoints/*
+datasets/*
+datasets_pickle/*
 results
 eigen-3.4.0
 *.bash
