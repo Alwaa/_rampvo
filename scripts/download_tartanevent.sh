@@ -9,7 +9,7 @@ fi
 
 DEST_DIR="$1"
 ROOT_URL="https://download.ifi.uzh.ch/rpg/web/data/iros24_rampvo/datasets/TartanEvent"
-FILES=(
+DONE_FILES=(
     "abandonedfactory_night.zip"
     "abandonedfactory.zip"
     "amusement.zip"
@@ -27,6 +27,12 @@ FILES=(
     "seasonsforest_winter.zip"
     "seasonsforest.zip"
     "soulcity.zip"
+    "westerndesert.zip"
+)
+
+FILES=(
+    "neighborhood.zip"
+    "office.zip"
     "westerndesert.zip"
 )
 

@@ -67,34 +67,48 @@ class Update(nn.Module):
             nn.ReLU(inplace=False), nn.Linear(DIM, 2), GradientClip(), nn.Sigmoid()
         )
 
+    @Timer("NetFwdUpdate")
     def forward(self, net, inp, corr, flow, ii, jj, kk):
         """update operator"""
 
         # net: the hidden state (size=#edges x 384)
         # inp: corr:
-        with Timer("Update.NetUpdate.corr", enabled=True):
+        with Timer("NetFwdUpdate.corr", enabled=True):
             net = net + inp + self.corr(corr)
             net = self.norm(net)
 
-        with Timer("Update.NetUpdate.fasba", enabled=True):
+        with Timer("NetFwdUpdate.fasba", enabled=True):
             ix, jx = fastba.neighbors(kk, jj)
             mask_ix = (ix >= 0).float().reshape(1, -1, 1)
             mask_jx = (jx >= 0).float().reshape(1, -1, 1)
 
-        with Timer("Update.NetUpdate.c1c2", enabled=True):
+        with Timer("NetFwdUpdate.c1c2", enabled=True):
             net = net + self.c1(mask_ix * net[:, ix])
             net = net + self.c2(mask_jx * net[:, jx])
 
-        with Timer("Update.NetUpdate.agg", enabled=True):
+        with Timer("NetFwdUpdate.agg", enabled=True):
             net = net + self.agg_kk(net, kk)
             net = net + self.agg_ij(net, ii * 12345 + jj)
 
 
-        with Timer("Update.NetUpdate.gru", enabled=True):
+        with Timer("NetFwdUpdate.gru", enabled=True):
             net = self.gru(net)
 
-        # d: trajectory update | w: confidence score
-        return net, (self.d(net), self.w(net), None)
+        with Timer("NetFwdUpdate.TrajUpdate+ConfScore", enabled=True):
+            # d: trajectory update | w: confidence score
+            ret_tup = (self.d(net), self.w(net), None)
+        
+        # ######## NB! Comment out one other ##############
+        # with Timer("NetFwddUpdate.TrajUpdate", enabled=True):
+        #     d = self.d(net)
+        # with Timer("NetFwdUpdate.ConfScore", enabled=True):
+        #     w = self.w(net)
+    
+        # # d: trajectory update | w: confidence score
+        # ret_tup = (d, w, None)
+        # #################################################
+
+        return net, ret_tup
 
 
 class Patchifier(nn.Module):
@@ -104,6 +118,8 @@ class Patchifier(nn.Module):
         self.P = patch_size
         # self.input_mode = "SingleScale"
         # self.input_mode = "MultiScale"
+
+        self.enable_timing = True ##Remove default! TODO:
 
         if self.input_mode in ("SingleScale"):
             evs_ch_dim, img_ch_dim = channels_dim
@@ -144,23 +160,23 @@ class Patchifier(nn.Module):
         """Compute features and extract patches from input images"""
 
         events, images, mask = None, None, None
-
-        if self.input_mode in ("SingleScale"):
-            events, images, _ = input_
-            fmap, imap, _ = self.encoder(events=events, images=images, reinit_hidden=reinit_hidden)
-            fmap = fmap / 4.0
-            imap = imap / 4.0
-        elif self.input_mode in ("MultiScale"):
-            events, images, mask = input_
-            fmap, imap = self.encoder(
-                events=events, images=images, mask=mask, reinit_hidden=reinit_hidden
-            )
-            events = events[mask]
-            fmap = fmap / 4.0
-            imap = imap / 4.0
-        else:
-            fmap = self.fnet(input_) / 4.0
-            imap = self.inet(input_) / 4.0
+        with Timer("SLAM.Patchify.Endocder", enabled=self.enable_timing):
+            if self.input_mode in ("SingleScale"):
+                events, images, _ = input_
+                fmap, imap, _ = self.encoder(events=events, images=images, reinit_hidden=reinit_hidden)
+                fmap = fmap / 4.0
+                imap = imap / 4.0
+            elif self.input_mode in ("MultiScale"):
+                events, images, mask = input_
+                fmap, imap = self.encoder(
+                    events=events, images=images, mask=mask, reinit_hidden=reinit_hidden
+                )
+                events = events[mask]
+                fmap = fmap / 4.0
+                imap = imap / 4.0
+            else:
+                fmap = self.fnet(input_) / 4.0
+                imap = self.inet(input_) / 4.0
 
         if mask is not None and not mask.any():
             return None, None, None, None, None, None
@@ -169,44 +185,55 @@ class Patchifier(nn.Module):
 
         # bias selection towards regions with highest value of event mean map
         if event_bias:
-            event_inp = events if events is not None else input_
-            coords = get_coords_from_topk_events(
-                events=event_inp,
-                patches_per_image=patches_per_image,
-                border_suppression_size=0,
-                non_max_supp_rad=11,
-            )
+            with Timer("SLAM.Patchify.EventBiasCords", enabled=self.enable_timing):
+                event_inp = events if events is not None else input_
+                coords = get_coords_from_topk_events(
+                    events=event_inp,
+                    patches_per_image=patches_per_image,
+                    border_suppression_size=0,
+                    non_max_supp_rad=11,
+                )
         elif gradient_bias:
-            images_inp = images if images is not None else input_
-            g = self.__image_gradient(images_inp)
-            x = torch.randint(1, w - 1, size=[n, 3 * patches_per_image], device="cuda")
-            y = torch.randint(1, h - 1, size=[n, 3 * patches_per_image], device="cuda")
+            with Timer("SLAM.Patchify.GradBiasCords", enabled=self.enable_timing):
+                images_inp = images if images is not None else input_
+                g = self.__image_gradient(images_inp)
+                x = torch.randint(1, w - 1, size=[n, 3 * patches_per_image], device="cuda")
+                y = torch.randint(1, h - 1, size=[n, 3 * patches_per_image], device="cuda")
 
-            coords = torch.stack([x, y], dim=-1).float()
-            g = altcorr.patchify(g[0, :, None], coords, 0).view(n, 3 * patches_per_image)
+                coords = torch.stack([x, y], dim=-1).float()
+                g = altcorr.patchify(g[0, :, None], coords, 0).view(n, 3 * patches_per_image)
 
-            ix = torch.argsort(g, dim=1)
-            x = torch.gather(x, 1, ix[:, -patches_per_image:])
-            y = torch.gather(y, 1, ix[:, -patches_per_image:])
+                ix = torch.argsort(g, dim=1)
+                x = torch.gather(x, 1, ix[:, -patches_per_image:])
+                y = torch.gather(y, 1, ix[:, -patches_per_image:])
         # random patch selection
         else:
-            x = torch.randint(1, w - 1, size=[n, patches_per_image], device="cuda")
-            y = torch.randint(1, h - 1, size=[n, patches_per_image], device="cuda")
-            coords = torch.stack([x, y], dim=-1).float()
+            with Timer("SLAM.Patchify.RandomCords", enabled=self.enable_timing):
+                x = torch.randint(1, w - 1, size=[n, patches_per_image], device="cuda")
+                y = torch.randint(1, h - 1, size=[n, patches_per_image], device="cuda")
+                coords = torch.stack([x, y], dim=-1).float()
 
-        gmap = altcorr.patchify(fmap[0], coords, 1).view(b, -1, 128, self.P, self.P)
-        imap = altcorr.patchify(imap[0], coords, 0).view(b, -1, DIM, 1, 1)
+        with Timer("SLAM.Patchify.gmap", enabled=self.enable_timing):
+            gmap = altcorr.patchify(fmap[0], coords, 1).view(b, -1, 128, self.P, self.P)
+
+        with Timer("SLAM.Patchify.imap", enabled=self.enable_timing):
+            imap = altcorr.patchify(imap[0], coords, 0).view(b, -1, DIM, 1, 1)
 
         if disps is None:
             disps = torch.ones(b, n, h, w, device="cuda")
 
-        grid, _ = coords_grid_with_index(disps, device=fmap.device)
-        patches = altcorr.patchify(grid[0], coords, self.P // 2).view(b, -1, 3, self.P, self.P)
+
+        with Timer("SLAM.Patchify.grid", enabled=self.enable_timing):
+            grid, _ = coords_grid_with_index(disps, device=fmap.device)
+
+        with Timer("SLAM.Patchify.pathces", enabled=self.enable_timing):
+            patches = altcorr.patchify(grid[0], coords, self.P // 2).view(b, -1, 3, self.P, self.P)
 
         index = torch.arange(n, device="cuda").view(n, 1)
         index = index.repeat(1, patches_per_image).reshape(-1)
         
-        clr = altcorr.patchify(images[0], 4*(coords + 0.5), 0).view(b, -1, 3)
+        with Timer("SLAM.Patchify.clr", enabled=self.enable_timing):
+            clr = altcorr.patchify(images[0], 4*(coords + 0.5), 0).view(b, -1, 3)
         return fmap, gmap, imap, patches, index, clr
 
 

@@ -93,12 +93,12 @@ def print_timing_summary():
 
     def _print_exclusive(node, name="", indent=0):
         if name:
-            pad   = "    " * indent
+            pad   = " "*4 * indent
             total = sum(node.self_times)
             count = len(node.self_times)
             avg   = total/count if count else 0.0
-            print(f"{pad}{name:<15s} total {total:.0f} ms   "
-                f"{count} runs   avg {avg:.2f} ms")
+            print(f"{pad}{name:<25s} tot: {total:7.0f} ms    "
+                  f"{count:4d} runs    {avg:.2f} ms/run")
             
         for child_name, child in node.children.items():
             _print_exclusive(child, child_name, indent + 1)

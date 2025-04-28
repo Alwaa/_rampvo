@@ -151,7 +151,7 @@ def data_loader_all_events(
         else:
             mask = False
         masks.append(mask)
-        data_list.append((image, event_voxel, intrinsics, torch.tensor([mask])))
+        data_list.append((image.detach(), event_voxel.detach(), intrinsics, torch.tensor([mask]).detach()))
 
     # frame_indices = list(set(corresponding_frame_indices))
     # Check this masking operation
@@ -277,10 +277,9 @@ def run(cfg_VO, network, eval_cfg, data_list, enable_timing = False):
         with Timer("SLAM", enabled=enable_timing):
             slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
     
-    with Timer("FinalUpdates", enabled=enable_timing):
-        for _ in range(12):
-            with Timer("UpdateFinal", enabled=enable_timing):
-                slam.update()
+    # with Timer("FinalUpdates", enabled=enable_timing):
+    #     for _ in range(12):
+    #             slam.update()
        
     points = slam.points_.cpu().numpy()[:slam.m]
     colors = slam.colors_.view(-1, 3).cpu().numpy()[:slam.m]
@@ -345,6 +344,9 @@ def evaluate_sequence(
 
     return ate_score, rot_score, traj_est, traj_ref
 
+from torch.profiler import profile, record_function, ProfilerActivity
+import ctypes
+libc = ctypes.CDLL("libc.so.6")
 @torch.no_grad()
 def evaluate(
     net, trials=1, downsample_fact=1, config_VO=None, eval_cfg=None, results_path=None, enable_timing = False
@@ -361,6 +363,15 @@ def evaluate(
         config_VO.merge_from_file("config/default.yaml")
 
     results = {}
+
+    # torch.cuda.memory._record_memory_history(max_entries=100000)
+    # with profile(
+    # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    # record_shapes=True,
+    # profile_memory=True,
+    # # with_stack=True,
+    # # on_trace_ready=lambda p: p.export_chrome_trace("trace.json")
+    # ) as prof:
     for scene in test_split:
         print(f"loading training data ... scene:{scene}")
         if not os.path.exists(scene):
@@ -400,12 +411,14 @@ def evaluate(
         else:
             raise NotImplementedError("dataset not supported")
 
-        scene_data_list, scene_frame_indices = data_loader_all_events(
-            config=eval_cfg,
-            full_scene=scene,
-            downsample_fact=downsample_fact,
-            norm_to=norm_to,
-        )
+
+        with record_function("LOADER"):
+            scene_data_list, scene_frame_indices = data_loader_all_events(
+                config=eval_cfg,
+                full_scene=scene,
+                downsample_fact=downsample_fact,
+                norm_to=norm_to,
+            )
 
         eval_subtraj = partial(
             evaluate_sequence,
@@ -435,18 +448,24 @@ def evaluate(
             with open(results_path, "w") as json_file:
                 json.dump(results, json_file, indent=4)
         
+        #prof.step()
+        
         # cleanup memory
         print("\nCleaning memory...\n")
         print(len(scene_data_list))
+
         while not len(scene_data_list) == 0:
             a, ev, b, c = scene_data_list.pop()
+            ev = ev.detach().cpu().numpy()
+            a = a.detach().cpu().numpy()
+            b = b.detach().cpu().numpy()
+            c = c.detach().cpu().numpy()
             del ev # Big memory hog
             del a
             del b
             del c   
         print(len(scene_data_list)) 
-        gc.collect()
-        torch.cuda.empty_cache()
+        libc.malloc_trim(0)
 
         scene_data_list.clear()
         scene_frame_indices.clear()
@@ -457,7 +476,13 @@ def evaluate(
         del traj_est
         gc.collect()
         torch.cuda.empty_cache()
+        libc.malloc_trim(0)
 
+    # print("TESTING PROFILER:\n")
+    # print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+
+    # torch.cuda.memory._dump_snapshot("mem_profile.pkl")
+    # torch.cuda.memory._record_memory_history(enabled=None)
 
     if results_path is not None:
         with open(results_path, "w") as json_file:

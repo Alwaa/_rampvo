@@ -155,7 +155,7 @@ class Ramp_vo:
     def get_pose(self, t):
         if t in self.traj:
             return SE3(self.traj[t])
-
+        
         t0, dP = self.delta[t]
         return dP * self.get_pose(t0)
 
@@ -209,20 +209,25 @@ class Ramp_vo:
 
     def motion_probe(self):
         """ kinda hacky way to ensure enough motion for initialization """
-        kk = torch.arange(self.m-self.M, self.m, device="cuda")
-        jj = self.n * torch.ones_like(kk)
-        ii = self.ix[kk]
+        with Timer("MotionProbe", enabled=self.enable_timing):
+            kk = torch.arange(self.m-self.M, self.m, device="cuda")
+            jj = self.n * torch.ones_like(kk)
+            ii = self.ix[kk]
 
-        net = torch.zeros(1, len(ii), self.DIM, **self.kwargs) # torch.Size([1, 96, 384])
-        coords = self.reproject(indicies=(ii, jj, kk)) # torch.Size([1, 96, 2, 3, 3])
+            net = torch.zeros(1, len(ii), self.DIM, **self.kwargs) # torch.Size([1, 96, 384])
+            coords = self.reproject(indicies=(ii, jj, kk)) # torch.Size([1, 96, 2, 3, 3])
 
-        with autocast:
-            corr = self.corr(coords, indicies=(kk, jj))
-            ctx = self.imap[:,kk % (self.M * self.mem)]
-            net, (delta, weight, _) = \
-                self.network.update(net, ctx, corr, None, ii, jj, kk)
+            with autocast:
+                with Timer("MotionProbe.Corr", enabled=self.enable_timing):
+                    corr = self.corr(coords, indicies=(kk, jj))
 
-        return torch.quantile(delta.norm(dim=-1).float(), 0.5)
+                with Timer("MotionProbe.Ctx", enabled=self.enable_timing):
+                    ctx = self.imap[:,kk % (self.M * self.mem)]
+                with Timer("MotionProbe.NetUpdate", enabled=self.enable_timing):
+                    net, (delta, weight, _) = \
+                        self.network.update(net, ctx, corr, None, ii, jj, kk)
+
+            return torch.quantile(delta.norm(dim=-1).float(), 0.5)
 
     def motionmag(self, i, j):
         """ compute motion magnitude (mean flow of patches) between frames i and j"""
@@ -273,6 +278,7 @@ class Ramp_vo:
         to_remove = self.ix[self.kk] < self.n - self.cfg.REMOVAL_WINDOW
         self.remove_factors(to_remove)
 
+    @Timer("Update") #TODO: how can it be turned off?
     def update(self):
         with Timer("Update.ReProj", enabled=self.enable_timing):
             coords = self.reproject()
@@ -332,15 +338,17 @@ class Ramp_vo:
 
     def __call__(self, tstamp, input_tensor, intrinsics):
         """ track new frame """
-        input_ = preprocess_input(input_tensor=input_tensor)
+        with Timer("SLAM.PreProcess", enabled=self.enable_timing):
+            input_ = preprocess_input(input_tensor=input_tensor)
         
-        with autocast:
-            fmap, gmap, imap, patches, _, clr = self.network.patchify(
-                                            input_=input_,
-                                            patches_per_image=self.cfg.PATCHES_PER_FRAME, 
-                                            event_bias=self.event_bias,
-                                            reinit_hidden=True if tstamp == 0 else False,
-                                            )
+        with Timer("SLAM.Patchify", enabled=self.enable_timing):
+            with autocast:
+                fmap, gmap, imap, patches, _, clr = self.network.patchify(
+                                                input_=input_,
+                                                patches_per_image=self.cfg.PATCHES_PER_FRAME, 
+                                                event_bias=self.event_bias,
+                                                reinit_hidden=True if tstamp == 0 else False,
+                                                )
         if len(input_) > 2:
             _, _, mask = input_
             if not mask and mask is not None:
@@ -348,68 +356,80 @@ class Ramp_vo:
                 return
 
         ### update state attributes ###
-        self.tlist.append(tstamp)
-        self.tstamps_[self.n] = self.counter
-        self.intrinsics_[self.n] = intrinsics / self.RES
 
-        self.index_[self.n + 1] = self.n + 1
-        self.index_map_[self.n + 1] = self.m + self.M
-        
-        # color info for visualization
-        clr = (clr[0,:,[2,1,0]] + 0.5) * (255.0 / 2)
-        self.colors_[self.n] = clr.to(torch.uint8)
+        with Timer("SLAM.UpdateStateAttr", enabled=self.enable_timing):
+            self.tlist.append(tstamp)
+            self.tstamps_[self.n] = self.counter
+            self.intrinsics_[self.n] = intrinsics / self.RES
 
-        if self.n > 1:
-            if self.cfg.MOTION_MODEL == 'DAMPED_LINEAR':
-                P1 = SE3(self.poses_[self.n-1])
-                P2 = SE3(self.poses_[self.n-2])
-                
-                xi = self.cfg.MOTION_DAMPING * (P1 * P2.inv()).log()
-                tvec_qvec = (SE3.exp(xi) * P1).data
-                self.poses_[self.n] = tvec_qvec
-            else:
-                tvec_qvec = self.poses[self.n-1]
-                self.poses_[self.n] = tvec_qvec
+            self.index_[self.n + 1] = self.n + 1
+            self.index_map_[self.n + 1] = self.m + self.M
+            
+            # color info for visualization
+            clr = (clr[0,:,[2,1,0]] + 0.5) * (255.0 / 2)
+            self.colors_[self.n] = clr.to(torch.uint8)
+
+            if self.n > 1:
+                if self.cfg.MOTION_MODEL == 'DAMPED_LINEAR':
+                    with Timer("SLAM.UpdateStateAttr.DampedLin", enabled=self.enable_timing):
+                        P1 = SE3(self.poses_[self.n-1])
+                        P2 = SE3(self.poses_[self.n-2])
+                        
+                        xi = self.cfg.MOTION_DAMPING * (P1 * P2.inv()).log()
+                        tvec_qvec = (SE3.exp(xi) * P1).data
+                        self.poses_[self.n] = tvec_qvec
+                else:
+                    with Timer("SLAM.UpdateStateAttr.NotDampedLin", enabled=self.enable_timing):
+                        tvec_qvec = self.poses[self.n-1]
+                        self.poses_[self.n] = tvec_qvec
 
         # TODO better depth initialization
-        patches[:,:,2] = torch.rand_like(patches[:,:,2,0,0,None,None])
-        if self.is_initialized:
-            s = torch.median(self.patches_[self.n-3:self.n,:,2])
-            patches[:,:,2] = s
+        with Timer("SLAM.DepthInit", enabled=self.enable_timing):
+            patches[:,:,2] = torch.rand_like(patches[:,:,2,0,0,None,None])
+            if self.is_initialized:
+                s = torch.median(self.patches_[self.n-3:self.n,:,2])
+                patches[:,:,2] = s
 
-        self.patches_[self.n] = patches
+            self.patches_[self.n] = patches
 
         ### update network attributes ###
-        # every self.mem=32 times update imap memory with the new imap
-        self.imap_[self.n % self.mem] = imap.squeeze()
-        self.gmap_[self.n % self.mem] = gmap.squeeze()
-        self.fmap1_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 1, 1)
-        self.fmap2_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 4, 4)
 
-        self.counter += 1        
-        if self.n > 0 and not self.is_initialized:
-            if self.motion_probe() < 2.0:
-                self.delta[self.counter - 1] = (self.counter - 2, Id[0])
-                return
+        with Timer("SLAM.NetworkAttrUpdate", enabled=self.enable_timing):
+            # every self.mem=32 times update imap memory with the new imap
+            self.imap_[self.n % self.mem] = imap.squeeze()
+            self.gmap_[self.n % self.mem] = gmap.squeeze()
+            self.fmap1_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 1, 1)
+            self.fmap2_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 4, 4)
+
+            self.counter += 1        
+            if self.n > 0 and not self.is_initialized:
+                if self.motion_probe() < 2.0:
+                    self.delta[self.counter - 1] = (self.counter - 2, Id[0])
+                    return
 
         # update number of keyframes and number of total patches
         self.n += 1
         self.m += self.M
 
-        # add edges to the graph
-        self.append_factors(*self.__edges_forw())
-        self.append_factors(*self.__edges_back())
+        with Timer("SLAM.AddEdges", enabled=self.enable_timing):
+            # add edges to the graph
+            self.append_factors(*self.__edges_forw())
+            self.append_factors(*self.__edges_back())
 
         # initialize with 8 valid frames and do 12 slam updates
         if self.n == 8 and not self.is_initialized:
-            self.is_initialized = True            
 
-            for itr in range(12):
-                self.update()
+            with Timer("SLAM.NotInitializedUpdate", enabled=self.enable_timing):
+                self.is_initialized = True            
+
+                for itr in range(12):
+                    self.update()
         
         elif self.is_initialized:
-            self.update()
-            self.keyframe()
+            with Timer("SLAM.InitializedUpdate", enabled=self.enable_timing):
+                self.update()
+            with Timer("SLAM.InitializedKeyframe", enabled=self.enable_timing):
+                self.keyframe()
 
         else:
             # if not time=8 and not SLAM initialized do nothing
