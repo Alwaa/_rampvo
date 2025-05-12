@@ -341,7 +341,7 @@ class Ramp_vo:
         return flatmeshgrid(torch.arange(t0, t1, device="cuda"),
             torch.arange(max(self.n-r, 0), self.n, device="cuda"), indexing='ij')
 
-    def __call__(self, tstamp, input_tensor, intrinsics, curr_imu_pose = None, imu_delta = None):
+    def __call__(self, tstamp, input_tensor, intrinsics, curr_imu_pose = None):
         """ track new frame """
         with Timer("SLAM.PreProcess", enabled=self.enable_timing):
             input_ = preprocess_input(input_tensor=input_tensor)
@@ -374,7 +374,7 @@ class Ramp_vo:
             clr = (clr[0,:,[2,1,0]] + 0.5) * (255.0 / 2)
             self.colors_[self.n] = clr.to(torch.uint8)
 
-            if self.n > 1 and (curr_imu_pose is None or imu_delta is None):
+            if self.n > 1 and (curr_imu_pose is None):
                 if self.cfg.MOTION_MODEL == 'DAMPED_LINEAR':
                     with Timer("SLAM.UpdateStateAttr.DampedLin", enabled=self.enable_timing):
                         P1 = SE3(self.poses_[self.n-1])
@@ -431,7 +431,6 @@ class Ramp_vo:
         #     dv = torch.as_tensor(delta.dv, device="cuda", dtype=self.poses_.dtype)
         #     dp = torch.as_tensor(delta.dp, device="cuda", dtype=self.poses_.dtype)
 
-        #     # Bootstrap pose with the integrated rotation
         #     self.poses_[self.n-1, :3] = ((SE3(self.poses_[self.n-2]).rot() @ dR).reshape(-1))
             
         #     self.inertial_prior[self.n-1] = torch.cat([dp, dv], dim=0)
@@ -440,20 +439,6 @@ class Ramp_vo:
             #Test using IMU/pose data
             self.poses_[self.n -1, :] = curr_imu_pose
             # print("\n\nIMU: ",self.poses_[self.n])
-        if not imu_delta is None and self.n > 1:
-            imu_delta.to('cuda')
-            print(imu_delta.data)
-            imu_delta = SE3(imu_delta.data)
-            P_start = SE3(self.poses_[self.n-2])
-
-            # xi_damped  = 0.5 * imu_delta.log()
-            # print(SE3.exp(xi_damped))
-            # new = (SE3.exp(xi_damped) * P_start)
-
-            new = imu_delta*P_start
-            print(new)
-
-            self.poses_[self.n -1] = new.data
 
         with Timer("SLAM.AddEdges", enabled=self.enable_timing):
             # add edges to the graph

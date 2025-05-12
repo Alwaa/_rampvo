@@ -463,9 +463,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         async for (image, events, intrinsics, mask, f_i, imu_delta) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
-                # slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_pose=imu_pose)
-                imu_delta.cuda()
-                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, imu_delta=imu_delta)
+                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_pose=imu_pose)
             t += 1
         
             if mask:
@@ -518,7 +516,6 @@ def async_evaluate_sequence(
 
     try:
         traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est_)
-        #traj_ref, traj_est = traj_est, traj_ref
 
         # print("==================")
         # for i in range(len(traj_est.timestamps)):
