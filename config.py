@@ -11,7 +11,7 @@ QUEUE_BUFFER_SIZE = 1200
 # When to start the evaluation NB! Queue should load faster than is used on avg!
 QUEUE_ASYNC_MIN_SIZE = 400 
 #Currently test with pose
-IMU_TESTING = True
+IMU_TESTING = False
 #################################
 
 
@@ -19,11 +19,11 @@ IMU_TESTING = True
 if RAMPVO_ENV == "server":
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{SERVER_CUDA_NUMBER}"
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 2
-    DATA_ROOT    = "/"
+    TARTAN_PATH_PREFIX    = "/data/storage"
 else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 1
-    DATA_ROOT    = "/"
+    TARTAN_PATH_PREFIX    = ""
 #####################################
 
 

@@ -51,7 +51,8 @@ from config import (
     QUEUE_ASYNC_STALL_TIMEOUT,
     QUEUE_ASYNC_SLEEP_BETWEEN_STARTUP_CHECKS, 
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM,
-    IMU_TESTING
+    IMU_TESTING,
+    TARTAN_PATH_PREFIX
 )
 
 seed_everything(seed=1234)
@@ -568,37 +569,42 @@ def evaluate(
 
     for scene in test_split:
         print(f"loading training data ... scene:{scene}")
-        if not os.path.exists(scene):
-            raise FileNotFoundError(f"scene {scene} not found")
-        traj_ref_path = osp.join(scene, "pose_left.txt")
-        scene_name = os.path.basename(scene) if os.path.isdir(scene) else scene
-        timestamps_path = osp.join(scene, "timestamps.txt")
+        
+        scene_location = scene
+        if "Tartan" in dataset_name:
+            scene_location = osp.join(TARTAN_PATH_PREFIX,scene)
+            
+        if not os.path.exists(scene_location):
+            raise FileNotFoundError(f"scene {scene_location} not found")
+        traj_ref_path = osp.join(scene_location, "pose_left.txt")
+        scene_name = os.path.basename(scene_location) if os.path.isdir(scene_location) else scene_location
+        timestamps_path = osp.join(scene_location, "timestamps.txt")
         img_timestamps = np.loadtxt(timestamps_path)
 
         if "Tartan" in dataset_name:
-            set_global_params(K_path=osp.join(scene, "K.yaml"))
+            set_global_params(K_path=osp.join(scene_location, "K.yaml"))
             traj_ref = read_tartan_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
         elif "StereoDavis" in dataset_name:
             set_global_params(
-                K_path=osp.join(scene, "K.yaml"),
+                K_path=osp.join(scene_location, "K.yaml"),
                 standard_pose_format=True,
             )
             img_timestamps = img_timestamps / 1e6
             traj_ref = read_stereodavis_format_poses(
-                traj_path=osp.join(scene, "poses.txt"),
-                timestamps_path=osp.join(scene, "timestamps_poses.txt"),
+                traj_path=osp.join(scene_location, "poses.txt"),
+                timestamps_path=osp.join(scene_location, "timestamps_poses.txt"),
             )
         elif "EDS" in dataset_name:
             set_global_params(
-                K_path=osp.join(scene, "K.yaml"),
+                K_path=osp.join(scene_location, "K.yaml"),
                 standard_pose_format=True,
             )
             img_timestamps = img_timestamps / 1e6
             traj_ref = read_eds_format_poses(traj_ref_path)
         elif "MoonLanding" in dataset_name:
-            set_global_params(K_path=osp.join(scene, "K.yaml"))
+            set_global_params(K_path=osp.join(scene_location, "K.yaml"))
             traj_ref = read_moonlanding_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
@@ -608,7 +614,7 @@ def evaluate(
         async_q = Queue(maxsize=QUEUE_BUFFER_SIZE)
         loader_kwargs = {"queue":async_q,
                          "config":eval_cfg, 
-                         "full_scene":scene, 
+                         "full_scene":scene_location, 
                          "downsample_fact": downsample_fact, 
                          "norm_to":norm_to}
         loader_prod_thread = threading.Thread(
@@ -668,8 +674,12 @@ def evaluate(
 
 def pare_dataset_name(name: str) -> str:
     path_parts = name.split("/")
+    while path_parts[0] != "datasets" and len(path_parts) > 3:
+        path_parts = path_parts[1:]
     if path_parts[0] == "datasets":
         path_parts = path_parts[1:]
+    else:
+        print(f"\nFormatting! Check dataset name(s): {name}\nShould include 'datasets'")
     if path_parts[0] == "TartanEvent":
         path_parts[0] = "TartanE"
     # ASSUMES 2 level down
