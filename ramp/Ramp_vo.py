@@ -96,6 +96,11 @@ class Ramp_vo:
         # initialize poses to identity matrix
         self.poses_[:,6] = 1.0
 
+        # TODO: Integrate to the BA
+        # 6-vector (deltas) [p, v] per key-frame, initialized to zero
+        self.inertial_prior = torch.zeros(self.N, 6, dtype=torch.float, device="cuda")
+
+
         # store relative poses for removed frames
         self.delta = {}
 
@@ -336,7 +341,7 @@ class Ramp_vo:
         return flatmeshgrid(torch.arange(t0, t1, device="cuda"),
             torch.arange(max(self.n-r, 0), self.n, device="cuda"), indexing='ij')
 
-    def __call__(self, tstamp, input_tensor, intrinsics):
+    def __call__(self, tstamp, input_tensor, intrinsics, curr_imu_pose = None, imu_delta = None):
         """ track new frame """
         with Timer("SLAM.PreProcess", enabled=self.enable_timing):
             input_ = preprocess_input(input_tensor=input_tensor)
@@ -369,7 +374,7 @@ class Ramp_vo:
             clr = (clr[0,:,[2,1,0]] + 0.5) * (255.0 / 2)
             self.colors_[self.n] = clr.to(torch.uint8)
 
-            if self.n > 1:
+            if self.n > 1 and (curr_imu_pose is None or imu_delta is None):
                 if self.cfg.MOTION_MODEL == 'DAMPED_LINEAR':
                     with Timer("SLAM.UpdateStateAttr.DampedLin", enabled=self.enable_timing):
                         P1 = SE3(self.poses_[self.n-1])
@@ -378,10 +383,12 @@ class Ramp_vo:
                         xi = self.cfg.MOTION_DAMPING * (P1 * P2.inv()).log()
                         tvec_qvec = (SE3.exp(xi) * P1).data
                         self.poses_[self.n] = tvec_qvec
+
                 else:
                     with Timer("SLAM.UpdateStateAttr.NotDampedLin", enabled=self.enable_timing):
                         tvec_qvec = self.poses[self.n-1]
                         self.poses_[self.n] = tvec_qvec
+
 
         # TODO better depth initialization
         with Timer("SLAM.DepthInit", enabled=self.enable_timing):
@@ -411,6 +418,43 @@ class Ramp_vo:
         self.n += 1
         self.m += self.M
 
+        # # TODO: Import drt preintegration?
+        # if self.use_imu: # and len(self.imu_buf) > 1:
+
+        #     delta = drt.preintegrate(
+        #         list(self.imu_buf),
+        #         self.bg.cpu().numpy(),  # gyro bias
+        #         self.ba.cpu().numpy(),  # accel bias
+        #     )
+
+        #     dR = torch.as_tensor(delta.dR, device="cuda", dtype=self.poses_.dtype)
+        #     dv = torch.as_tensor(delta.dv, device="cuda", dtype=self.poses_.dtype)
+        #     dp = torch.as_tensor(delta.dp, device="cuda", dtype=self.poses_.dtype)
+
+        #     # Bootstrap pose with the integrated rotation
+        #     self.poses_[self.n-1, :3] = ((SE3(self.poses_[self.n-2]).rot() @ dR).reshape(-1))
+            
+        #     self.inertial_prior[self.n-1] = torch.cat([dp, dv], dim=0)
+
+        if not curr_imu_pose is None:
+            #Test using IMU/pose data
+            self.poses_[self.n -1, :] = curr_imu_pose
+            # print("\n\nIMU: ",self.poses_[self.n])
+        if not imu_delta is None and self.n > 1:
+            imu_delta.to('cuda')
+            print(imu_delta.data)
+            imu_delta = SE3(imu_delta.data)
+            P_start = SE3(self.poses_[self.n-2])
+
+            # xi_damped  = 0.5 * imu_delta.log()
+            # print(SE3.exp(xi_damped))
+            # new = (SE3.exp(xi_damped) * P_start)
+
+            new = imu_delta*P_start
+            print(new)
+
+            self.poses_[self.n -1] = new.data
+
         with Timer("SLAM.AddEdges", enabled=self.enable_timing):
             # add edges to the graph
             self.append_factors(*self.__edges_forw())
@@ -434,6 +478,7 @@ class Ramp_vo:
         else:
             # if not time=8 and not SLAM initialized do nothing
             pass
+
 
     #################### pose prediction ####################
 
