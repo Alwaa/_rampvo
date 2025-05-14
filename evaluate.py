@@ -531,7 +531,7 @@ if __name__ == "__main__":
     parser.add_argument("--downsample_fact", type=int, default=1)
     parser.add_argument("--results_path", type=str, default=None)
     parser.add_argument("--timeit", action='store_true')
-    parser.add_argument("--save_encoder_path", type=str, default=None)
+    parser.add_argument("--save_slam_steps_path", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -549,7 +549,7 @@ if __name__ == "__main__":
         downsample_fact=args.downsample_fact,
         results_path=args.results_path,
         enable_timing=args.timeit,
-        save_encoder_path = args.save_encoder_path
+        save_slam_steps_path = args.save_slam_steps_path
     )
 
     rows = []
