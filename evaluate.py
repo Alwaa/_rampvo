@@ -244,18 +244,17 @@ def imu_unpacker(item_tuple:tuple) -> tuple:
     return (im, ev, intr, mask, f_i, imu_pose)
 
 async def _queue_iterator(data_queue: Queue):
-    last_size = data_queue.qsize()
-    last_growth = time.monotonic()
+    last_size, last_growth  = data_queue.qsize(),time.monotonic()
+
     while data_queue.qsize() < QUEUE_ASYNC_MIN_SIZE:
         size = data_queue.qsize()
-
         atqdm.write(f"[Evaluator] waiting for buffer (size={size}); need {QUEUE_ASYNC_MIN_SIZE}")
 
         if size > 1 and size != last_size:
             last_growth = time.monotonic()
         elif time.monotonic() - last_growth > QUEUE_ASYNC_STALL_TIMEOUT:
             if size < 2:
-                raise Exception("No Event Loaded after {QUEUE_ASYNC_STALL_TIMEOUT}s\n\tCheck Setup!")
+                raise Exception("No Event Loaded after {QUEUE_ASYNC_STALL_TIMEOUT}s\n\tCheck Setup!\n")
             # Otherwise, if there are events, break out of checking loop
             atqdm.write(f"[Evaluator] queue size={size} stalled for {QUEUE_ASYNC_STALL_TIMEOUT}s, proceeding")
             break
@@ -263,11 +262,8 @@ async def _queue_iterator(data_queue: Queue):
         await asyncio.sleep(QUEUE_ASYNC_SLEEP_BETWEEN_STARTUP_CHECKS)
         last_size = size
     
-    if IMU_TESTING:
-        unpacker = imu_unpacker
-    else:
-        unpacker = base_unpacker
-    
+    unpacker = imu_unpacker if IMU_TESTING else base_unpacker
+
     loop = asyncio.get_running_loop()
     while True:
         item = await loop.run_in_executor(None, data_queue.get)
@@ -307,13 +303,16 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         traj_est: the estimated trajectory
         tstamps: the timestamps of the estimated trajectory
     """
+
     img_timestamps = []
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
     slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
-    t = 0
+
     evaluation_iter_bar = atqdm(_queue_iterator(data_queue))
     evaluation_iter_bar.set_description("Async Evaluating")
-    #TODO: Shouldn't duplicate the whole thing
+
+    #TODO: Shouldn't duplicate the whole thing + Queue enumerate
+    t = 0
     if IMU_TESTING:
         async for (image, events, intrinsics, mask, f_i, imu_pose) in evaluation_iter_bar:
             image, events = resize_input(image, events)
@@ -354,27 +353,16 @@ def async_evaluate_sequence(
             cfg_VO=config_VO, network=net, eval_cfg=eval_cfg, data_queue=data_queue, enable_timing=enable_timing
         ))
 
-
-
     traj_est_ = PoseTrajectory3D(
         positions_xyz=traj_est[:, :3],
         orientations_quat_wxyz=traj_est[:, 3:][:, (1, 2, 3, 0)],
         timestamps=img_timestamps_all[frame_indecies],
     )
 
-    # print(traj_est_)
-    # for i in range(len(traj_est_.timestamps)):
-    #     print(traj_est_.positions_xyz[i], traj_ref.positions_xyz[i])
-
     save_output_for_COLMAP("colmap_saving", traj_est_, points, colors, fx, fy, cx, cy)
-
 
     try:
         traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est_)
-
-        # print("==================")
-        # for i in range(len(traj_est.timestamps)):
-        #     print(traj_est.positions_xyz[i], traj_ref.positions_xyz[i])
 
         result = main_ape.ape(
             traj_ref=traj_ref,
@@ -389,31 +377,39 @@ def async_evaluate_sequence(
         rot_score = rot_error_with_alignment_from_pose3d(
             ref=traj_ref, est=traj_est, correct_scale=True
         )
-    except:
+
+    except Exception as e:
         ate_score = 1000
         rot_score = [1000, 1000, 1000]
+        print(f"\nWARNING: Result not computed correctly for sequence beacase fo exception: {e}")
     
     print(result)
     T = result.np_arrays["alignment_transformation_sim3"]
-    print(result.np_arrays["alignment_transformation_sim3"])
-    T = sR = T[:3, :3]                    
+    sR = T[:3, :3]                    
     scale = np.cbrt(np.linalg.det(sR)) 
     print("scale =", scale)
-    print("==================")
     print("==================")
 
     return ate_score, rot_score, traj_est, traj_ref
 
 @torch.no_grad()
 def evaluate(
-    net, trials=1, downsample_fact=1, config_VO=None, eval_cfg=None, results_path=None, enable_timing = False
+    net, 
+    trials=1, 
+    downsample_fact=1, 
+    config_VO=None, 
+    eval_cfg=None, 
+    results_path=None, 
+    enable_timing = False,
+    save_encoder_path = None
 ):
-    test_ = eval_cfg["data_loader"]["test"]
-    train_ = eval_cfg["data_loader"]["train"]["args"]
-    norm_to = train_["norm_to"] if train_.get("norm_to") else None
+    test_ = eval_cfg["data_loader"]["test"]    
     test_split = test_["test_split"]
     dataset_name = test_["dataset_name"]
     use_pose_pred = test_["use_pose_pred"]
+
+    train_ = eval_cfg["data_loader"]["train"]["args"]
+    norm_to = train_.get("norm_to", None)
 
     if config_VO is None:
         config_VO = VO_cfg
@@ -422,12 +418,13 @@ def evaluate(
     results = {}
 
     for scene in test_split:
-        print(f"loading training data ... scene:{scene}")
-        print(f"Dataset: ", dataset_name)
+        print(f"loading training data from scene:{scene}")
+        print(f"Dataset: {dataset_name}")
 
         scene_location = scene
         if "Tartan" in dataset_name:
             scene_location = osp.join(TARTAN_PATH_PREFIX,scene)
+        
         print("SCENE LOCATION: ", scene_location)
             
         if not os.path.exists(scene_location):
@@ -552,6 +549,7 @@ if __name__ == "__main__":
     parser.add_argument("--downsample_fact", type=int, default=1)
     parser.add_argument("--results_path", type=str, default=None)
     parser.add_argument("--timeit", action='store_true')
+    parser.add_argument("--save_encoder_path", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -568,7 +566,8 @@ if __name__ == "__main__":
         trials=args.trials,
         downsample_fact=args.downsample_fact,
         results_path=args.results_path,
-        enable_timing=args.timeit
+        enable_timing=args.timeit,
+        save_encoder_path = args.save_encoder_path
     )
 
     rows = []
