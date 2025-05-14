@@ -1,5 +1,4 @@
 import asyncio
-import gc
 import os
 
 from queue import Queue
@@ -497,17 +496,6 @@ def evaluate(
             with open(results_path, "w") as json_file:
                 json.dump(results, json_file, indent=4)
         
-        #prof.step()
-        
-        # !cleanup memory, no longer needed with queue!
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # print("TESTING PROFILER:\n")
-    # print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
-
-    # torch.cuda.memory._dump_snapshot("mem_profile.pkl")
-    # torch.cuda.memory._record_memory_history(enabled=None)
 
     if results_path is not None:
         with open(results_path, "w") as json_file:
@@ -517,6 +505,7 @@ def evaluate(
                 test_,
             ]
             json.dump(results, json_file, indent=4)
+
     return results
 
 def pare_dataset_name(name: str) -> str:
