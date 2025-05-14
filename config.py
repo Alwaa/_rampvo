@@ -18,12 +18,10 @@ IMU_TESTING = False
 ### Location Specific & Overrides ###
 if RAMPVO_ENV == "server":
     # os.environ["CUDA_VISIBLE_DEVICES"] = f"{SERVER_CUDA_NUMBER}"
-    try:
-        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-        assert not (cuda_visible is None)
-        assert len(cuda_visible) > 0
-    except:
-        print("!On the server you need to set!:\n CUDA:_VISIBLE_DEVICES\n")
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    assert not (cuda_visible is None), "!On the server you need to set!:\n CUDA:_VISIBLE_DEVICES\n"
+    assert len(cuda_visible) > 0, "!On the server you need to set!:\n CUDA:_VISIBLE_DEVICES\n"
+
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 2
     TARTAN_PATH_PREFIX    = "/data/storage"
 else:
