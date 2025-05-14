@@ -108,7 +108,7 @@ class TartanEvent(RGBDDataset):
         
         for scene_id_path in self.validation_index:
             all_indices.append(scene_id_path)
-
+        print("validation index", self.validation_index)
         for scene_data in all_indices:
             scene_id_path = scene_data if isinstance(scene_data, str) else scene_data[0]
 
