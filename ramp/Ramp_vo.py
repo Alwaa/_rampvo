@@ -98,6 +98,12 @@ class Ramp_vo:
 
         # initialize poses to identity matrix
         self.poses_[:, 6] = 1.0
+        self.poses_[:,6] = 1.0
+
+        # TODO: Integrate to the BA
+        # 6-vector (deltas) [p, v] per key-frame, initialized to zero
+        self.inertial_prior = torch.zeros(self.N, 6, dtype=torch.float, device="cuda")
+
 
         # store relative poses for removed frames
         self.delta = {}
@@ -412,15 +418,23 @@ class Ramp_vo:
                         P1 = SE3(self.poses_[self.n - 1])
                         P2 = SE3(self.poses_[self.n - 2])
 
+            if self.n > 1 and (curr_imu_pose is None):
+                if self.cfg.MOTION_MODEL == 'DAMPED_LINEAR':
+                    with Timer("SLAM.UpdateStateAttr.DampedLin", enabled=self.enable_timing):
+                        P1 = SE3(self.poses_[self.n-1])
+                        P2 = SE3(self.poses_[self.n-2])
+                        
                         xi = self.cfg.MOTION_DAMPING * (P1 * P2.inv()).log()
                         tvec_qvec = (SE3.exp(xi) * P1).data
                         self.poses_[self.n] = tvec_qvec
+
                 else:
                     with Timer(
                         "SLAM.UpdateStateAttr.NotDampedLin", enabled=self.enable_timing
                     ):
                         tvec_qvec = self.poses[self.n - 1]
                         self.poses_[self.n] = tvec_qvec
+
 
         # TODO better depth initialization
         with Timer("SLAM.DepthInit", enabled=self.enable_timing):
@@ -450,6 +464,28 @@ class Ramp_vo:
         self.n += 1
         self.m += self.M
 
+        # # TODO: Import drt preintegration?
+        # if self.use_imu: # and len(self.imu_buf) > 1:
+
+        #     delta = drt.preintegrate(
+        #         list(self.imu_buf),
+        #         self.bg.cpu().numpy(),  # gyro bias
+        #         self.ba.cpu().numpy(),  # accel bias
+        #     )
+
+        #     dR = torch.as_tensor(delta.dR, device="cuda", dtype=self.poses_.dtype)
+        #     dv = torch.as_tensor(delta.dv, device="cuda", dtype=self.poses_.dtype)
+        #     dp = torch.as_tensor(delta.dp, device="cuda", dtype=self.poses_.dtype)
+
+        #     self.poses_[self.n-1, :3] = ((SE3(self.poses_[self.n-2]).rot() @ dR).reshape(-1))
+            
+        #     self.inertial_prior[self.n-1] = torch.cat([dp, dv], dim=0)
+
+        if not curr_imu_pose is None:
+            #Test using IMU/pose data
+            self.poses_[self.n -1, :] = curr_imu_pose
+            # print("\n\nIMU: ",self.poses_[self.n])
+
         with Timer("SLAM.AddEdges", enabled=self.enable_timing):
             # add edges to the graph
             self.append_factors(*self.__edges_forw())
@@ -472,6 +508,7 @@ class Ramp_vo:
         else:
             # if not time=8 and not SLAM initialized do nothing
             pass
+
 
     #################### pose prediction ####################
 
@@ -496,6 +533,7 @@ class Ramp_vo:
         weights = self.last_weight.clone()
 
         # add all edges from every other frame (self.ii) to the new virtual frame
+        # NOTE: FILTERING BECAUSE OF OBSERVED GYRO CHANGE HERE
         ii, jj, kk, weights_up = add_forward_elements(
             frame_num=next_frame_number,
             patch_extracted_num=self.M,
