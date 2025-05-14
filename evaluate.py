@@ -386,60 +386,6 @@ def resize_input(image, events):
 
 
 @torch.no_grad()
-def __run_pose_pred(cfg_VO, network, eval_cfg, data_list, t_horizon_to_pred, t_to_pred, deg_approx=4, enable_timing = False):
-    """Run the slam on the given data_list using pose prediction algorithm 
-       for bootstrapping and return the trajectory and timestamps. 
-       Pose prediction typically slows down VO frequency.
-        
-    Args:
-        cfg_VO: config for the slam
-        network: the network to use for the slam
-        eval_cfg: config for the evaluation
-        data_list: list of tuples (image, events, intrinsics)
-        t_horizon_to_pred: the time horizon to predict the future
-        t_to_pred: the time to start predicting the future
-        deg_approx: the degree of the polynomial to use for the prediction
-        
-    Returns:
-        traj_est: the estimated trajectory
-        tstamps: the timestamps of the estimated trajectory
-    """
-    train_cfg = eval_cfg["data_loader"]["train"]["args"]
-    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
-    for t, (image, events, intrinsics, mask) in enumerate(tqdm(_data_iterator(data_list))):
-        with Timer("SLAM", enabled=enable_timing):
-            image, events = resize_input(image, events)
-
-            if t < t_to_pred or t_to_pred < 0:
-                with Timer("InitTrack", enabled=enable_timing):
-                    slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
-                    last_keyframe_number = slam.n
-
-            if t == t_to_pred and t_to_pred > 0:
-                with Timer("TPredUpdt", enabled=enable_timing):
-                    for _ in range(12):
-                        slam.update()
-
-            if t >= t_to_pred and t_to_pred > 0:
-                with Timer("FuturePred", enabled=enable_timing):
-                    sec_to_pred_future = t - t_to_pred
-                    slam.predict_future_pose(
-                            last_keyframe_number=last_keyframe_number,
-                            sec_to_pred_future=sec_to_pred_future, 
-                            abs_time=t,
-                            deg=deg_approx,
-                            )
-                
-            if t == t_to_pred + t_horizon_to_pred:
-                break
-    
-    with Timer("FinalUpdates", enabled=enable_timing):
-        for _ in range(12):
-            slam.update()
-
-    return slam.terminate()
-
-@torch.no_grad()
 async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing = False):
     """Run the slam on the given data_list and return the trajectory and timestamps
 
@@ -623,6 +569,7 @@ def evaluate(
         loader_prod_thread = threading.Thread(
             target=async_data_loader_all_events, kwargs=loader_kwargs, daemon=True
         )
+
         loader_prod_thread.start()
 
         eval_subtraj = partial(

@@ -165,26 +165,6 @@ def compute_patch_track_(coords, ii, jj, kk, image_to_proj=-1, to_gpu=False):
     return patch_dict
 
 
-def compute_patch_track__(coords, ii, jj, kk, image_to_proj):
-    patch_dict = defaultdict(list)
-    new_image_mask = (jj==image_to_proj)
-    start_edge = ii[new_image_mask]
-    patch_edge = kk[new_image_mask]
-
-    for start_image, patch_id in zip(start_edge,patch_edge):
-        start_image = start_image.cpu().item()
-        patch_id = patch_id.cpu().item()
-        if ((ii==start_image) & (jj==image_to_proj)).any() == False:
-            continue
-        
-        mask = (ii==start_image) & (kk==patch_id)
-        patch = coords[0,mask,:,0,0]
-        if len(patch) == 0 or len(patch_dict[start_image, patch_id]) > 0:
-            continue
-        
-        patch_dict[start_image, patch_id] = patch
-    return patch_dict
-
 
 def motion_bootstrap(n, poses, MOTION_MODEL, MOTION_DAMPING):
     if MOTION_MODEL == 'DAMPED_LINEAR':
@@ -197,21 +177,6 @@ def motion_bootstrap(n, poses, MOTION_MODEL, MOTION_DAMPING):
     else:
         return poses[n-1]
     
-
-def add_forward_elements(frame_num, patch_extracted_num, r, ii, jj, kk, ix, weights):
-    t0 = patch_extracted_num * max((frame_num - r), 0)
-    t1 = patch_extracted_num * max((frame_num - 1), 0)
-    kk_toadd, jj_toadd = flatmeshgrid(
-        torch.arange(t0, t1, device="cuda"), torch.arange(frame_num-1, frame_num, device="cuda"), indexing='ij')
-    
-    ii_stack = torch.cat([ii, ix[kk_toadd]])
-    jj_stack = torch.cat([jj, jj_toadd])
-    kk_stack = torch.cat([kk, kk_toadd])
-
-    new_weights = torch.zeros((1, len(kk_toadd), 2), device="cuda")
-    weights_stack = torch.cat([weights, new_weights], dim=1)
-
-    return ii_stack, jj_stack, kk_stack, weights_stack
 
 
 # for each starting image, once the starting image is fixed there is a patch on the target image when the target image is changed
@@ -258,77 +223,6 @@ def predict_patch_pos(step_to_pred_future,
         spl_y = UnivariateSpline(x=t_, y=y_, w=w, bbox=[None, None], k=deg, s=None, ext=0, check_finite=False)
 
         new_time = t[-1]+(step_to_pred_future/frequency)
-        new_x = torch.tensor(spl_x(new_time))
-        new_y = torch.tensor(spl_y(new_time))
-
-        # produce a grid of 3x3 around the predicted point
-        x = torch.arange(new_x - steps, new_x + steps + 1)[:3]
-        y = torch.arange(new_y - steps, new_y + steps + 1)[:3]
-        cols_grid, rows_grid = torch.meshgrid(x, y)
-
-        mask = (ii==start_image) & (kk==patch_id)
-        edge_mask = mask & (jj==next_frame_index)
-
-        coords[:,edge_mask,:,:,:] = torch.stack((rows_grid,cols_grid), dim=0).cuda()
-        weights[:,edge_mask,:] = masked_weights
-
-    return coords.cuda(), weights.cuda()
-
-
-def fit_model_patch_track(next_frame_index, 
-                           patch_dict, 
-                           img_to_keyframe_map, 
-                           ii, jj, 
-                           data_shape, 
-                           frequency=30, deg=2):
-    past_patch_num = 5
-    height, width = data_shape
-    patch_models = {}
-    # patch_id: is the unique id extracted in each frame, in frame 0 ids=0:95, in frame 1 ids=96:191
-    for start_patch_pair in patch_dict.keys():
-        start_image, patch_id = start_patch_pair
-        first_connected_frame = jj[ii==start_image].min()
-
-        # discard coords reprojection on the next virtual frame
-        x,y = patch_dict[start_patch_pair][:-1].T.cpu().numpy()
-        t = (img_to_keyframe_map[first_connected_frame:next_frame_index] / frequency).cpu().numpy()
-
-        x_mask = (x>=0) & (x<width)
-        y_mask = (y>=0) & (y<height)
-        mask = x_mask & y_mask
-
-        #if mask[-past_patch_num:].all() == False:
-        if np.all(mask[-past_patch_num:]==False):
-            masked_weights = 0
-        else:
-            masked_weights = 10**-9
-
-        x_ = x[-past_patch_num:]
-        y_ = y[-past_patch_num:]
-        t_ = t[-past_patch_num:]
-        w = (t_-t_[0])/(t[-1]-t_[0]) + 10**-7
-        assert len(t_) == len(x_)
-        spl_x = UnivariateSpline(x=t_, y=x_, w=w, bbox=[None, None], k=deg, s=None, ext=0, check_finite=False)
-        spl_y = UnivariateSpline(x=t_, y=y_, w=w, bbox=[None, None], k=deg, s=None, ext=0, check_finite=False)
-
-        last_t_stamp = t_[-1]
-        patch_models[start_patch_pair] = (spl_x, spl_y, masked_weights, last_t_stamp)
-        
-    return patch_models
-
-
-def predict_patch_on_model(patch_models, 
-                           step_to_pred_future, 
-                           frequency, 
-                           next_frame_index, 
-                           coords, weights, 
-                           ii, jj, kk):
-    steps=1
-    for start_patch_pair in patch_models.keys():
-        start_image, patch_id = start_patch_pair
-        spl_x, spl_y, masked_weights, last_t_stamp = patch_models[start_patch_pair]
-
-        new_time = last_t_stamp+(step_to_pred_future/frequency)
         new_x = torch.tensor(spl_x(new_time))
         new_y = torch.tensor(spl_y(new_time))
 
