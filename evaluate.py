@@ -569,10 +569,12 @@ def evaluate(
 
     for scene in test_split:
         print(f"loading training data ... scene:{scene}")
+        print(f"Dataset: ", dataset_name)
 
         scene_location = scene
         if "Tartan" in dataset_name:
             scene_location = osp.join(TARTAN_PATH_PREFIX,scene)
+        print("SCENE LOCATION: ", scene_location)
             
         if not os.path.exists(scene_location):
             raise FileNotFoundError(f"scene {scene_location} not found")
