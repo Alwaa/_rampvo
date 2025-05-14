@@ -15,7 +15,6 @@ import torchvision
 import numpy as np
 import polars as pl
 import os.path as osp
-from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 from pathlib import Path
 from evo.core import sync
@@ -113,71 +112,6 @@ def save_results(
         np.concatenate((time_est, traj_est.positions_xyz, traj_est.orientations_quat_wxyz), axis=1),
     )
 
-
-# pose pred part still uses this, need to clean up that part
-def data_loader_all_events(
-    config, full_scene, downsample_fact=1, norm_to=None, extension=".png"
-):
-    images_paths = osp.join(full_scene, "image_left", "*{}".format(extension))
-    imfiles = sorted(glob.glob(images_paths))
-    evfile = osp.join(full_scene, "events.h5")
-    intrinsics = torch.as_tensor([fx, fy, cx, cy])
-    TartanEvent_loader = TartanEvent(config=config, path=full_scene, just_validation = True)
-    timestamps = np.loadtxt(osp.join(full_scene, "timestamps.txt"))
-
-    # skip first element (no events for it)
-    image_files = imfiles[1 :: downsample_fact]
-    corresponding_timestamps = timestamps[1 :: downsample_fact]
-
-    # load events and compute how many are they
-    event = H5EventHandle.from_path(Path(evfile))
-    n_events = len(event.t)
-    n_events_selected = TartanEvent_loader.num_events_selected
-    n_events_voxels = n_events // n_events_selected
-    corr_events_timestamps = event.t[0:n_events:n_events_selected][1::]
-
-    time_vicinity = (
-        np.subtract.outer(corr_events_timestamps, corresponding_timestamps) ** 2
-    )
-    corresponding_frame_indices = np.argmin(time_vicinity, axis=1)
-    corresponding_events_indices = np.argmin(time_vicinity, axis=0)
-
-    print("import images and events ...")
-    data_list = []
-    masks = []
-    i1 = 0
-    for i in tqdm(range(n_events_voxels)):
-        i0 = i1
-        i1 = i1 + n_events_selected
-        event_voxel = TartanEvent_loader.events_from_indices(
-            event=event, i_start=i0, i_stop=i1
-        )
-
-        frame_ind = corresponding_frame_indices[i]
-
-        imfile = image_files[frame_ind]
-        image = torchvision.io.read_image(imfile)
-        image = normalize_image(images=image, norm_img_to=norm_to)
-
-        # plot_events(event, image, i0, i1, i)
-        # the index of the smallest error between the event voxel timestamp and the image timestamp is event index
-        event_ind = corresponding_events_indices[frame_ind]
-        if event_ind == i:
-            mask = True
-        else:
-            mask = False
-        masks.append(mask)
-        data_list.append((image.detach(), event_voxel.detach(), intrinsics, torch.tensor([mask]).detach()))
-
-    # frame_indices = list(set(corresponding_frame_indices))
-    # Check this masking operation
-    frame_indices = list(set(corresponding_frame_indices[masks]))
-    
-
-    return data_list, frame_indices
-
-
-
 def async_data_loader_all_events(
     queue: Queue, config, full_scene, downsample_fact=1, norm_to=None, extension=".png"
 ):
@@ -204,9 +138,9 @@ def async_data_loader_all_events(
     pose_data = np.loadtxt(osp.join(full_scene, "stamped_groundtruth" + suffix + ".txt"), dtype=np.float64)
     assert vel_data.shape[0] == pose_data.shape[0]
 
-    imu_t        = imu_data[:, 0]          # seconds or nanoseconds; decide once and stay consistent
-    imu_gyro     = imu_data[:, 2:5]        # wx, wy, wz  (rad/s)
-    imu_accel    = imu_data[:, 5:8]        # ax, ay, az  (m/s²)
+    imu_t        = imu_data[:, 0] #seconds
+    imu_gyro     = imu_data[:, 2:5]
+    imu_accel    = imu_data[:, 5:8]
     def imu_slice(start_t, end_t):
         _i0 = np.searchsorted(imu_t, start_t, side="left")
         _i1 = np.searchsorted(imu_t, end_t,   side="right")
@@ -221,27 +155,16 @@ def async_data_loader_all_events(
     P0_inv   = P_all[0:1].inv()  
     P_rel    = P0_inv * P_all
 
-    print(P_rel)
-
-    # ---------------------------------------------            
-
-    # poses_rel = P_rel.data.detach().cpu().numpy()  
-    # def pose_slice(start_t, end_t):
-    #     _i0 = np.searchsorted(pose_t, start_t, side="left")
-    #     _i1 = np.searchsorted(pose_t, end_t,   side="right")
-    #     return poses_rel[_i0:_i1, :]
-    
-    # def pose_last(start_t, end_t):
-    #     _i1 = np.searchsorted(pose_t, end_t,   side="right")
-    #     return poses_rel[_i1 - 1, :]
-    
-    def pose_delta(start_t, end_t):
+    poses_rel = P_rel.data.detach().cpu().numpy()  
+    def pose_slice(start_t, end_t):
         _i0 = np.searchsorted(pose_t, start_t, side="left")
         _i1 = np.searchsorted(pose_t, end_t,   side="right")
-        P_start, P_end = P_all[_i0], P_all[_i1]
-        P_start, P_end = P_rel[_i0], P_rel[_i1]
-        delta = P_end * P_start.inv()
-        return delta
+        return poses_rel[_i0:_i1, :]
+    
+    def pose_last(start_t, end_t):
+        _i1 = np.searchsorted(pose_t, end_t,   side="right")
+
+    # ---------------------------------------------            
 
     # skip first element (no events for it)
     image_files = imfiles[1 :: downsample_fact]
@@ -279,7 +202,7 @@ def async_data_loader_all_events(
         image = torchvision.io.read_image(imfile)
         image = normalize_image(images=image, norm_img_to=norm_to)
 
-        # plot_events(event, image, i0, i1, i)
+        # plot_events(event, image, i0, i1, i) #TODO: Fix absolute paths
         # the index of the smallest error between the event voxel timestamp and the image timestamp is event index
         event_ind = corresponding_events_indices[frame_ind]
 
@@ -289,15 +212,9 @@ def async_data_loader_all_events(
             ts_start_ns, ts_end_ns = event.t[i0], event.t[i1 - 1] # first and last event in voxel
             ts_start, ts_end = ts_start_ns/1e9, ts_end_ns/1e9
 
-            # pose = pose_last(ts_start,ts_end)
-            # pose = torch.from_numpy(pose).float()
-            # tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, pose)
-            try:
-                delta = pose_delta(ts_start,ts_end)
-            except:
-                delta = None
-                print("Delta None")
-            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, delta)
+            pose = pose_last(ts_start,ts_end)
+            pose = torch.from_numpy(pose).float()
+            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, pose)
         else:    
             tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind)
             
@@ -306,14 +223,6 @@ def async_data_loader_all_events(
     queue.put(None) #DONE:=0
 
     return "Done!:0"
-
-def _data_iterator(data_list):
-    for image, events, intrinsics, mask in data_list:
-        im = image[None, None, ...].cuda()
-        ev = events[None, None, ...].float().cuda()
-        intr = intrinsics.cuda()
-        mask.cuda()
-        yield im, ev, intr, mask
 
 def base_unpacker(item_tuple: tuple) -> tuple:
     image, events, intrinsics, mask, f_i = item_tuple
@@ -341,7 +250,6 @@ async def _queue_iterator(data_queue: Queue):
         size = data_queue.qsize()
 
         atqdm.write(f"[Evaluator] waiting for buffer (size={size}); need {QUEUE_ASYNC_MIN_SIZE}")
-
 
         if size > 1 and size != last_size:
             last_growth = time.monotonic()
@@ -404,10 +312,9 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
     t = 0
     evaluation_iter_bar = atqdm(_queue_iterator(data_queue))
-    evaluation_iter_bar.set_description(f"Async Evaluating")
+    evaluation_iter_bar.set_description("Async Evaluating")
     #TODO: Shouldn't duplicate the whole thing
     if IMU_TESTING:
-        # async for (image, events, intrinsics, mask, f_i, imu_pose) in evaluation_iter_bar:
         async for (image, events, intrinsics, mask, f_i, imu_pose) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
