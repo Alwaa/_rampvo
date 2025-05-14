@@ -19,32 +19,7 @@ import os
 
 from data import H5EventHandle
 
-
-# old_times = []
-# class Timer:
-#     def __init__(self, name, enabled=True):
-#         self.name = name
-#         self.enabled = enabled
-
-#         if self.enabled:
-#             self.start = torch.cuda.Event(enable_timing=True)
-#             self.end = torch.cuda.Event(enable_timing=True)
-
-#     def __enter__(self):
-#         if self.enabled:
-#             self.start.record()
-
-#     def __exit__(self, type, value, traceback):
-#         global old_times
-#         if self.enabled:
-#             self.end.record()
-#             torch.cuda.synchronize()
-
-#             elapsed = self.start.elapsed_time(self.end)
-#             old_times.append(elapsed)
-#             print(self.name, elapsed)
-
-
+#Global variable for timers
 all_times: dict[str, list] = defaultdict(list)
 
 class Timer(ContextDecorator):
