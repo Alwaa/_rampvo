@@ -86,6 +86,7 @@ class TartanEvent(RGBDDataset):
         if self.aug:
             self.augmentor = EventRGBDAugmentor(crop_size=crop_size)
 
+        self.validation_index = [path] #hotfix attempt
         print("Pre index builder: ", self.validation_index)
         self.build_events_indices()
 
