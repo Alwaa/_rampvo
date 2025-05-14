@@ -377,7 +377,7 @@ class Ramp_vo:
             indexing="ij",
         )
 
-    def __call__(self, tstamp, input_tensor, intrinsics):
+    def __call__(self, tstamp, input_tensor, intrinsics, curr_imu_pose = None):
         """track new frame"""
         with Timer("SLAM.PreProcess", enabled=self.enable_timing):
             input_ = preprocess_input(input_tensor=input_tensor)
