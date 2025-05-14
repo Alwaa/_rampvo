@@ -58,7 +58,8 @@ seed_everything(seed=1234)
 sys.setrecursionlimit(100000)
 
 
-def set_global_params(K_path=None, standard_pose_format=False, resize_to=None):
+# TODO: Investigate 'standard_pose_format' variable that was unused, but set for EDS and SteroDavis
+def set_global_params(K_path=None, resize_to=None):
     global fx, fy, cx, cy
 
     if K_path is None or not os.path.exists(K_path):
@@ -434,30 +435,22 @@ def evaluate(
         timestamps_path = osp.join(scene_location, "timestamps.txt")
         img_timestamps = np.loadtxt(timestamps_path)
 
+        set_global_params(K_path=osp.join(scene_location, "K.yaml")) #standard pose format for EDS and Stereo Davis did nothing
+
         if "Tartan" in dataset_name:
-            set_global_params(K_path=osp.join(scene_location, "K.yaml"))
             traj_ref = read_tartan_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
         elif "StereoDavis" in dataset_name:
-            set_global_params(
-                K_path=osp.join(scene_location, "K.yaml"),
-                standard_pose_format=True,
-            )
             img_timestamps = img_timestamps / 1e6
             traj_ref = read_stereodavis_format_poses(
                 traj_path=osp.join(scene_location, "poses.txt"),
                 timestamps_path=osp.join(scene_location, "timestamps_poses.txt"),
             )
         elif "EDS" in dataset_name:
-            set_global_params(
-                K_path=osp.join(scene_location, "K.yaml"),
-                standard_pose_format=True,
-            )
             img_timestamps = img_timestamps / 1e6
             traj_ref = read_eds_format_poses(traj_ref_path)
         elif "MoonLanding" in dataset_name:
-            set_global_params(K_path=osp.join(scene_location, "K.yaml"))
             traj_ref = read_moonlanding_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
