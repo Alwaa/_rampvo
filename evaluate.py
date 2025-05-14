@@ -461,7 +461,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     #TODO: Shouldn't duplicate the whole thing
     if IMU_TESTING:
         # async for (image, events, intrinsics, mask, f_i, imu_pose) in evaluation_iter_bar:
-        async for (image, events, intrinsics, mask, f_i, imu_delta) in evaluation_iter_bar:
+        async for (image, events, intrinsics, mask, f_i, imu_pose) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
                 slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_pose=imu_pose)
@@ -569,7 +569,7 @@ def evaluate(
 
     for scene in test_split:
         print(f"loading training data ... scene:{scene}")
-        
+
         scene_location = scene
         if "Tartan" in dataset_name:
             scene_location = osp.join(TARTAN_PATH_PREFIX,scene)
