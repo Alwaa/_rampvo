@@ -44,6 +44,7 @@ torch.set_num_interop_threads(4) #NOT CURRENTLY A FACTOR? MAYBE FOR TRAINING?
 
 print("\nintra-op threads:", torch.get_num_threads())
 print("inter-op threads:", torch.get_num_interop_threads())
+print("CurrentGPU", os.environ.get("CUDA_VISIBLE_DEVICES"))
 
 print(f"\n NB! For [Evaluation] you should see {LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM} + {GENERAL_TORCH_INTRA_OP_THREAD_NUM}\
       number of threads with active CPU usage.")

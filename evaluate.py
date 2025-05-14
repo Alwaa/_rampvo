@@ -192,6 +192,7 @@ def async_data_loader_all_events(
     images_paths = osp.join(full_scene, "image_left", "*{}".format(extension))
     imfiles = sorted(glob.glob(images_paths))
     evfile = osp.join(full_scene, "events.h5")
+    print("EventFile: ", evfile)
     TartanEvent_loader = TartanEvent(config=config, path=full_scene, just_validation = True)
     timestamps = np.loadtxt(osp.join(full_scene, "timestamps.txt"))
 
