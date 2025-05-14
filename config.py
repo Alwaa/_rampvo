@@ -19,7 +19,9 @@ IMU_TESTING = False
 if RAMPVO_ENV == "server":
     # os.environ["CUDA_VISIBLE_DEVICES"] = f"{SERVER_CUDA_NUMBER}"
     try:
-        _ = os.environ.get("CUDA_VISIBLE_DEVICES")
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        assert not (cuda_visible is None)
+        assert len(cuda_visible) > 0
     except:
         print("!On the server you need to set!:\n CUDA:_VISIBLE_DEVICES\n")
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 2
