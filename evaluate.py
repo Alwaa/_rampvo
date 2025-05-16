@@ -549,7 +549,7 @@ if __name__ == "__main__":
         downsample_fact=args.downsample_fact,
         results_path=args.results_path,
         enable_timing=args.timeit,
-        save_slam_steps_path = args.save_slam_steps_path
+        save_encoder_path = args.save_slam_steps_path
     )
 
     rows = []
