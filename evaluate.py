@@ -493,7 +493,7 @@ def evaluate(
         skipped_scenes = []
         for j in range(trials):
             res = eval_subtraj()
-            if res in None:
+            if res is None:
                 print(f"SKIPPING: {scene_name}")
                 skipped_scenes.append(scene_name)
                 continue
