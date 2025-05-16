@@ -254,7 +254,8 @@ async def _queue_iterator(data_queue: Queue):
             last_growth = time.monotonic()
         elif time.monotonic() - last_growth > QUEUE_ASYNC_STALL_TIMEOUT:
             if size < 2:
-                raise Exception("No Event Loaded after {QUEUE_ASYNC_STALL_TIMEOUT}s\n\tCheck Setup!\n")
+                print("No Event Loaded after {QUEUE_ASYNC_STALL_TIMEOUT}s\n\tCheck Setup!\n")
+                break
             # Otherwise, if there are events, break out of checking loop
             atqdm.write(f"[Evaluator] queue size={size} stalled for {QUEUE_ASYNC_STALL_TIMEOUT}s, proceeding")
             break
@@ -336,6 +337,8 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     #     for _ in range(12):
     #             slam.update()
     
+    if t == 0:
+        return None
 
     points = slam.points_.cpu().numpy()[:slam.m]
     colors = slam.colors_.view(-1, 3).cpu().numpy()[:slam.m]
@@ -349,9 +352,13 @@ def async_evaluate_sequence(
     if use_pose_pred:
         raise NotImplementedError("Removed Pose Prediction as it didn't increase performance enough")
     else:
-        traj_est, _tstamps, points, colors, frame_indecies = asyncio.run(async_run(
+        res = asyncio.run(async_run(
             cfg_VO=config_VO, network=net, eval_cfg=eval_cfg, data_queue=data_queue, enable_timing=enable_timing
         ))
+        if res is None:
+            return None
+        
+        traj_est, _tstamps, points, colors, frame_indecies = res
 
     traj_est_ = PoseTrajectory3D(
         positions_xyz=traj_est[:, :3],
@@ -456,6 +463,7 @@ def evaluate(
         else:
             raise NotImplementedError("dataset not supported")
         
+        #TODO: Fix for multiple trails
         async_q = Queue(maxsize=QUEUE_BUFFER_SIZE)
         loader_kwargs = {"queue":async_q,
                          "config":eval_cfg, 
@@ -482,8 +490,14 @@ def evaluate(
         save_res = partial(save_results, scene=scene_name, eval_type="full_data")
 
         results[scene] = {}
+        skipped_scenes = []
         for j in range(trials):
-            ate_error, rot_error, traj_est, traj_ref = eval_subtraj()
+            res = eval_subtraj()
+            if res in None:
+                print(f"SKIPPING: {scene_name}")
+                skipped_scenes.append(scene_name)
+                continue
+            ate_error, rot_error, traj_est, traj_ref = res
             print("\n full_data ate ------->", ate_error)
             print("\n full_data rot ------->", rot_error)
             save_res(traj_est=traj_est, traj_ref=traj_ref, j=j)
@@ -491,6 +505,10 @@ def evaluate(
                 "ate": ate_error,
                 "rot_err": list(rot_error),
             }
+
+        print("SKIPPED THE FOLLOGING: \n")
+        for s in skipped_scenes:
+            print("- ", s)
 
         if results_path is not None:
             with open(results_path, "w") as json_file:
