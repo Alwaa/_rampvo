@@ -5,8 +5,6 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from scipy.spatial.transform import Rotation as R
 
-from evo.core import sync
-from evo.tools import plot
 import evo.main_ape as main_ape
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
