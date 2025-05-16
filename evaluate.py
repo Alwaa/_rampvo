@@ -524,8 +524,8 @@ def pare_dataset_name(name: str) -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weights", default="dpvo.pth")
-    parser.add_argument("--config_VO", default="config/default.yaml")
+    parser.add_argument("--weights", default="dpvo.pth") #TODO: Fic to singlescae/Multiscale from config eval
+    parser.add_argument("--config_VO", default="config_vo/default.yaml")
     parser.add_argument("--config_eval", type=str, default="config/TartanEvent.json")
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--downsample_fact", type=int, default=1)
