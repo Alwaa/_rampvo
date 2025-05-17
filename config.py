@@ -6,9 +6,9 @@ RAMPVO_ENV = os.environ.get("RAMPVO_ENV", "server").lower()
 
 ########### General ##############
 # 1200 => Around 10GB; 0 => No bound!
-QUEUE_BUFFER_SIZE = 1200 
+QUEUE_BUFFER_SIZE = 2400 
 # When to start the evaluation NB! Queue should load faster than is used on avg!
-QUEUE_ASYNC_MIN_SIZE = 400 
+QUEUE_ASYNC_MIN_SIZE = 1200 
 #Currently test with pose
 IMU_TESTING = False
 #################################
@@ -32,8 +32,8 @@ else:
 GENERAL_TORCH_INTRA_OP_THREAD_NUM = 4
 # Seconds untill just starting eval if not growing
 # NB! Only triggers is QUEUE_ASYNC_MIN_SIZE is larger than smallest data set event num
-QUEUE_ASYNC_STALL_TIMEOUT = 5.0
-QUEUE_ASYNC_SLEEP_BETWEEN_STARTUP_CHECKS = 1.0
+QUEUE_ASYNC_STALL_TIMEOUT = 10.0
+QUEUE_ASYNC_SLEEP_BETWEEN_STARTUP_CHECKS = 5.0
 ###########################################################
 
 

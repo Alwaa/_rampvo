@@ -1,6 +1,7 @@
 import asyncio
 import os
 
+import datetime
 from queue import Queue
 import sys
 import glob
@@ -153,7 +154,7 @@ def async_data_loader_all_events(
     poses_raw = torch.as_tensor(poses_raw, dtype=torch.float32, device='cpu').contiguous()
     P_all = SE3(poses_raw)
     P0_inv   = P_all[0:1].inv()  
-    P_rel    = P0_inv * P_all
+    P_rel: SE3 = P0_inv * P_all
 
     poses_rel = P_rel.data.detach().cpu().numpy()  
     def pose_slice(start_t, end_t):
@@ -423,6 +424,7 @@ def evaluate(
         config_VO.merge_from_file("config/default.yaml")
 
     results = {}
+    skipped_scenes = []
 
     for scene in test_split:
         print(f"loading training data from scene:{scene}")
@@ -490,7 +492,6 @@ def evaluate(
         save_res = partial(save_results, scene=scene_name, eval_type="full_data")
 
         results[scene] = {}
-        skipped_scenes = []
         for j in range(trials):
             res = eval_subtraj()
             if res is None:
@@ -506,13 +507,14 @@ def evaluate(
                 "rot_err": list(rot_error),
             }
 
-        print("SKIPPED THE FOLLOGING: \n")
-        for s in skipped_scenes:
-            print("- ", s)
 
         if results_path is not None:
             with open(results_path, "w") as json_file:
                 json.dump(results, json_file, indent=4)
+
+    print("SKIPPED THE FOLLOGING: \n")
+    for s in skipped_scenes:
+        print("- ", s)
         
 
     if results_path is not None:
@@ -591,7 +593,19 @@ if __name__ == "__main__":
         pl.col("rot_err").list.get(2).alias("z_rot_err"),
     ]).drop("rot_err")
 
+    _year, week_num, week_day = tuple(datetime.date.today().isocalendar())
+    time_min = datetime.datetime.now().strftime("%H%M")
+
+    save_dir = osp.join(
+        os.getcwd(),
+        "results_summary",
+        f"week_{week_num:02d}",
+    )
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
     print(df)
+    df.write_csv(osp.join(save_dir, f"result_{week_num:02d}_{time_min}.csv"))
     
     if args.timeit:
         print_timing_summary()

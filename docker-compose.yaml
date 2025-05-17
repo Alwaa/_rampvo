@@ -1,0 +1,27 @@
+services:
+  test_gpu:
+    image: vio
+    container_name: vio
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true
+    ipc: host
+    tty: true
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - XAUTHORITY=/tmp/.docker.xauth
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth
+      - /data/storage/datasets/TartanEvent:/data/storage/datasets/TartanEvent
+      - /data/storage/alexander:/data/user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
