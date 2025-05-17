@@ -605,7 +605,7 @@ if __name__ == "__main__":
         os.makedirs(save_dir)
 
     print(df)
-    df.write_csv(osp.join(save_dir, f"result_{week_num:02d}_{time_min}.csv"))
+    df.write_csv(osp.join(save_dir, f"result_{week_day:02d}_{time_min}.csv"))
     
     if args.timeit:
         print_timing_summary()
