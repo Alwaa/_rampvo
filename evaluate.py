@@ -139,7 +139,10 @@ def async_data_loader_all_events(
     pose_data = np.loadtxt(osp.join(full_scene, "stamped_groundtruth" + suffix + ".txt"), dtype=np.float64)
     assert vel_data.shape[0] == pose_data.shape[0]
 
-    imu_t        = imu_data[:, 0] #seconds
+    print(imu_data)
+    print(imu_data.shape)
+
+    imu_t        = imu_data[:, 1] #seconds
     imu_gyro     = imu_data[:, 2:5]
     imu_accel    = imu_data[:, 5:8]
     def imu_slice(start_t, end_t):
@@ -213,9 +216,14 @@ def async_data_loader_all_events(
             ts_start_ns, ts_end_ns = event.t[i0], event.t[i1 - 1] # first and last event in voxel
             ts_start, ts_end = ts_start_ns/1e9, ts_end_ns/1e9
 
-            pose = pose_last(ts_start,ts_end)
-            pose = torch.from_numpy(pose).float()
-            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, pose)
+            # pose = pose_last(ts_start,ts_end)
+            # pose = torch.from_numpy(pose).float()
+
+
+            imu_tuple = imu_slice(ts_start, ts_end) #imu_ts, imu_gyro, imu_accel
+            if i0 == 0:
+                print(imu_tuple)
+            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, imu_tuple)
         else:    
             tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind)
             
@@ -236,13 +244,15 @@ def base_unpacker(item_tuple: tuple) -> tuple:
 
 #TODO: Should be actual imu data in the end
 def imu_unpacker(item_tuple:tuple) -> tuple:
-    image, events, intrinsics, mask, f_i, imu_pose = item_tuple
+    image, events, intrinsics, mask, f_i, imu_tuple = item_tuple
     im = image[None, None, ...].cuda()
     ev = events[None, None, ...].float().cuda()
     intr = intrinsics.cuda()
     mask.cuda()
 
-    return (im, ev, intr, mask, f_i, imu_pose)
+    # torch.from_numpy(imu_g).float()
+
+    return (im, ev, intr, mask, f_i, imu_tuple)
 
 async def _queue_iterator(data_queue: Queue):
     last_size, last_growth  = data_queue.qsize(),time.monotonic()
@@ -316,10 +326,10 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     #TODO: Shouldn't duplicate the whole thing + Queue enumerate
     t = 0
     if IMU_TESTING:
-        async for (image, events, intrinsics, mask, f_i, imu_pose) in evaluation_iter_bar:
+        async for (image, events, intrinsics, mask, f_i, imu_tuple) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
-                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_pose=imu_pose)
+                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_data=imu_tuple)
             t += 1
         
             if mask:

@@ -46,6 +46,14 @@ RUN apt-get update && \
       libxrender1 && \
     rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
+        build-essential cmake git pkg-config && \
+      apt-get install -y libeigen3-dev libboost-all-dev \
+                   libceres-dev libopencv-dev libgflags-dev libgoogle-glog-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+
 RUN conda create -n ramp_vio -y python==3.10 \
     pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia
 RUN conda run -n ramp_vio pip install torch-scatter -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
