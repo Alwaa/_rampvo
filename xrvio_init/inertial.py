@@ -1,5 +1,5 @@
 import numpy as np
-
+from scipy.optimize import lsq_linear
 
 def rodrigues_matrix(axis: np.ndarray, angle: float) -> np.ndarray:
     """
@@ -20,6 +20,16 @@ def rodrigues_matrix(axis: np.ndarray, angle: float) -> np.ndarray:
     R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
     return R
 
+def integrate_gyro_per_frame(gyro_ts, gyro_meas, frame_ts):
+    # returns R_frames[k] = rotation from frame 0 to frame k
+    R_frames = []
+    for k in range(len(frame_ts)-1):
+        # select imu samples in [frame_ts[k], frame_ts[k+1]]
+        mask = (gyro_ts >= frame_ts[k]) & (gyro_ts <= frame_ts[k+1])
+        R_seg = integrate_gyro(gyro_ts[mask], gyro_meas[mask])[-1]
+        R_frames.append(R_seg)
+    # prepend identity for frame 0
+    return [np.eye(3)] + R_frames
 
 def integrate_gyro(gyro_ts: np.ndarray, gyro_meas: np.ndarray) -> list:
     """
@@ -147,3 +157,85 @@ def va_align(R_list: list, acc_mean: np.ndarray) -> tuple:
     # Bias is the difference between measured mean accel and true gravity in body0
     bias = acc_mean - g_body0
     return bias, g_world
+
+
+def va_align_with_scale(
+    R_list: list[np.ndarray],
+    delta_p: list[np.ndarray],
+    t_dict: dict[tuple[int,int], np.ndarray]
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """
+    Solve for scale s, gravity vector g, and accel bias b in camera frame.
+
+    We set up the linear system arising from:
+      s * t_ij  ≈ R_j @ (delta_p[j] - delta_p[i])  - 0.5 * g * dt^2_ij
+    and also incorporate the bias term via:
+      R_list[i] @ (acc_mean - b) ≈ g
+
+    Args:
+        R_list:  list of (3×3) rotations from time-0 to time-i
+        delta_p: list of (3,) numpy arrays of pre-integrated position from time-0 to i
+        t_dict:  {(i,j) : unit-translation t_ij from solve_translation}
+
+    Returns:
+        s:   scalar metric scale
+        g:   (3,) gravity vector in camera frame
+        b:   (3,) estimated accelerometer bias
+    """
+    # 1) Collect all pairs and build least-squares for scale & gravity
+    # We'll solve: s * t_ij + 0.5*g*dt2 = R_j (dp_j - dp_i)
+    # => [t_ij, 0.5*dt2*I] [s; g] = rhs_ij
+    A_rows = []
+    b_rows = []
+    # For bias, we also solve R0 (b) + g = acc_mean, but we can add as a single constraint
+    # after we compute mean accel.
+
+    # Here we assume constant frame-rate dt between consecutive frames:
+    #   dt_ij = 1 (or known). If actual timestamps are known, replace dt=ts[j]-ts[i].
+    for (i, j), t_unit in t_dict.items():
+        dp_i = delta_p[i]
+        dp_j = delta_p[j]
+        dt = 1.0  # or your actual dt_list[j]-dt_list[i]
+        rhs = R_list[j] @ (dp_j - dp_i)
+        # build row-block: [ t_ij , 0.5*dt^2 * I3 ]
+        A_rows.append(np.hstack([ t_unit.reshape(3,1), 0.5*(dt**2)*np.eye(3) ]))  # shape (3,4)
+        b_rows.append(rhs.reshape(3,1))
+
+    # Stack into big least-squares: A @ [s; g] = b
+    A = np.vstack(A_rows)  # shape (3M, 4)
+    b = np.vstack(b_rows)  # shape (3M, 1)
+
+
+    # Solve [s; g] by normal equations or lstsq
+    x, *_ = np.linalg.lstsq(A, b, rcond=None)
+    s = float(x[0])
+    g = x[1:4, 0]
+
+    # # bounds: s ∈ [0, +∞), g_x/g_y/g_z ∈ (−∞, +∞)
+    # lower = np.array([0.0, -np.inf, -np.inf, -np.inf])
+    # upper = np.array([np.inf, np.inf, np.inf, np.inf])
+
+    # res = lsq_linear(A, b.ravel(), bounds=(lower, upper), lsmr_tol='auto')
+    # x = res.x.reshape(4,1)
+    # s = float(x[0,0])
+    # g = x[1:4,0]
+
+
+
+    # 2) Now recover accelerometer bias b via mean-acc alignment:
+    #    R0 @ (acc_mean - b) = g  =>  R0 b = acc_mean - R0^T g
+    # We can compute acc_mean from delta_p double derivative or directly from measurements.
+    # For simplicity, let's assume acc_mean known externally or zero-mean gravity.
+    # If you have raw acc_meas list:
+    #     acc_mean = np.mean(acc_meas, axis=0)
+    # else we approximate with g direction:
+    acc_mean = None  # you must supply this from your data
+    if acc_mean is None:
+        # fallback: assume bias=0
+        b = np.zeros(3)
+    else:
+        R0 = R_list[0]
+        # R0 @ (acc_mean - b) = g  =>  b = acc_mean - R0.T @ g
+        b = acc_mean - R0.T @ g
+
+    return s, g, b

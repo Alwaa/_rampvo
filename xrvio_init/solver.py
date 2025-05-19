@@ -1,20 +1,22 @@
 import numpy as np
 from typing import List, Dict, Tuple
 
-from .inertial import integrate_gyro, va_align
+from .inertial import integrate_gyro, integrate_gyro_per_frame, preintegrate_accel, va_align, va_align_with_scale
 from .visual import extract_and_match, estimate_rel_rot, solve_translation
 
 def initialize(imu_ts: Dict[str, np.ndarray],
+               frame_ts,
                gyro_meas: np.ndarray,
                acc_meas: np.ndarray,
                K: np.ndarray,
                frames: List[np.ndarray] = None,
-               matches: Dict[Tuple[int,int], Tuple[np.ndarray, np.ndarray]] = None
+               matches: Dict[Tuple[int,int], Tuple[np.ndarray, np.ndarray]] = None,
+               weights=None
                ) -> Tuple[
                    Dict[Tuple[int,int], np.ndarray],  # refined rotations
                    Dict[Tuple[int,int], np.ndarray],  # translations
                    np.ndarray,                        # accel bias
-                   np.ndarray                         # gravity vector
+                   np.ndarray                         # gravity vector #TODO: Add weight in signature
                ]:
     """
     Full decoupled rotation-translation init:
@@ -37,8 +39,11 @@ def initialize(imu_ts: Dict[str, np.ndarray],
         bias_a: (3,) accelerometer bias
         gravity: (3,) gravity vector in ref frame
     """
+    imu_times = imu_ts['gyro'] #TODO: fix format
     # 1) Gyro integration
-    R_list = integrate_gyro(imu_ts['gyro'], gyro_meas)
+    R_list = integrate_gyro(imu_times, gyro_meas)
+    # R_list = integrate_gyro_per_frame(imu_ts['gyro'], gyro_meas, frame_ts)
+        
 
     # 2) Visual matching
     # matches = extract_and_match(frames) if matches is None else matches
@@ -61,6 +66,11 @@ def initialize(imu_ts: Dict[str, np.ndarray],
 
     # 5) VA-align for accel bias & gravity
     acc_mean = np.mean(acc_meas, axis=0)
-    bias_a, gravity = va_align(list(R_list), acc_mean)
+    bias_guess, _g = va_align(list(R_list), acc_mean)
+    delta_p_list, delta_v_list = preintegrate_accel(imu_times, acc_meas, bias_guess)
 
-    return R_dict, t_dict, bias_a, gravity
+    scale, gravity, bias_a = va_align_with_scale(R_list, delta_p_list, t_dict)
+
+
+
+    return R_dict, t_dict, bias_a, gravity, weights, scale

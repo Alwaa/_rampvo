@@ -3,7 +3,8 @@ import g2o
 
 def bundle_adjustment(R_dict: dict,
                       t_dict: dict,
-                      max_iterations: int = 15
+                      max_iterations: int = 15,
+                      weights = None
                       ) -> dict:
     """
     Pose-graph bundle adjustment over a set of relative pose constraints.
@@ -64,7 +65,16 @@ def bundle_adjustment(R_dict: dict,
         edge.set_vertex(1, optimizer.vertex(j))
         meas = g2o.Isometry3d(R, t_vec)
         edge.set_measurement(meas)
-        edge.set_information(np.eye(6))
+
+        if weights is None:
+            edge.set_information(np.eye(6))
+        else:
+            # weights[(i,j)] is an (Ni_j,2) array but you want a single scalar per edge:
+            w_ij = float(weights[(i,j)].mean())  # average confidence over that edge
+            # build a diagonal 6×6 info matrix:
+            info = np.diag([w_ij, w_ij, w_ij, 1e-3, 1e-3, 1e-3])
+            edge.set_information(info)
+
         optimizer.add_edge(edge)
 
     # Optimize

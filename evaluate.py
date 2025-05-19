@@ -221,8 +221,8 @@ def async_data_loader_all_events(
 
 
             imu_tuple = imu_slice(ts_start, ts_end) #imu_ts, imu_gyro, imu_accel
-            if i0 == 0:
-                print(imu_tuple)
+            # if i0 == 0:
+            #     print(imu_tuple)
             tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, imu_tuple)
         else:    
             tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind)
@@ -302,7 +302,7 @@ def resize_input(image, events):
 
 
 @torch.no_grad()
-async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing = False):
+async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing = False, save_slam_steps_path= None):
     """Run the slam on the given data_list and return the trajectory and timestamps
 
     Args:
@@ -329,7 +329,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         async for (image, events, intrinsics, mask, f_i, imu_tuple) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
-                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_data=imu_tuple)
+                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_data=imu_tuple, save_slam_steps_path = save_slam_steps_path)
             t += 1
         
             if mask:
@@ -356,15 +356,18 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     poses, tstamps = slam.terminate()
     return poses, tstamps, points, colors, img_timestamps
 
+import numpy as np
+import matplotlib.pyplot as plt
+from evo.tools import plot
 
 def async_evaluate_sequence(
-    config_VO, net, eval_cfg, data_queue: Queue, traj_ref, use_pose_pred, img_timestamps_all, enable_timing = False
+    config_VO, net, eval_cfg, data_queue: Queue, traj_ref, use_pose_pred, img_timestamps_all, enable_timing = False, save_slam_steps_path = None
 ):
     if use_pose_pred:
         raise NotImplementedError("Removed Pose Prediction as it didn't increase performance enough")
     else:
         res = asyncio.run(async_run(
-            cfg_VO=config_VO, network=net, eval_cfg=eval_cfg, data_queue=data_queue, enable_timing=enable_timing
+            cfg_VO=config_VO, network=net, eval_cfg=eval_cfg, data_queue=data_queue, enable_timing=enable_timing, save_slam_steps_path= save_slam_steps_path
         ))
         if res is None:
             return None
@@ -396,11 +399,71 @@ def async_evaluate_sequence(
             ref=traj_ref, est=traj_est, correct_scale=True
         )
 
+
+
     except Exception as e:
         ate_score = 1000
         rot_score = [1000, 1000, 1000]
         print(f"\nWARNING: Result not computed correctly for sequence beacase fo exception: {e}")
+
+    try:
+        if traj_ref is not None and traj_est is not None:
+            np.savez_compressed(
+                "aligned_trajs.npz",
+                ref_t   = traj_ref.timestamps,
+                ref_pos = traj_ref.positions_xyz,
+                ref_q   = traj_ref.orientations_quat_wxyz,
+                est_t   = traj_est.timestamps,
+                est_pos = traj_est.positions_xyz,
+                est_q   = traj_est.orientations_quat_wxyz,
+            )
+            print("→ dumped aligned_trajs.npz")
+    except Exception as e:
+        print("Failed to save trajectories with exception: ", e)
     
+    # --- Quick matplotlib plot -----
+    # get N×3 arrays of [x,y,z]
+    ref_xyz = traj_ref.positions_xyz  
+    est_xyz = traj_est.positions_xyz
+
+    plt.figure(figsize=(6,6))
+    # reference as dashed
+    plt.plot(ref_xyz[:,0], ref_xyz[:,1], '--', label='reference')
+    # estimate as solid
+    plt.plot(est_xyz[:,0], est_xyz[:,1], '-',  label='estimate')
+
+    # mark start/end
+    plt.scatter(ref_xyz[0,0], ref_xyz[0,1], marker='o', s=60, label='start')
+    plt.scatter(ref_xyz[-1,0], ref_xyz[-1,1], marker='x', s=60, label='end')
+
+    plt.axis('equal')
+    plt.xlabel('x [m]')
+    plt.ylabel('y [m]')
+    plt.title('Trajectory Comparison (XY)')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("traj_compare_mat.png", dpi=300)
+    plt.close()
+
+    # fig, ax = plt.subplots(figsize=(6,6))
+    # plot.traj(ax, traj_ref, style="--", label="reference")
+    # plot.traj(ax, traj_est, style="-",  label="estimate")
+    # ax.scatter(traj_ref.positions_xyz[0,0], traj_ref.positions_xyz[0,1],
+    #         marker="o", s=50, label="start (ref)")
+    # ax.scatter(traj_ref.positions_xyz[-1,0], traj_ref.positions_xyz[-1,1],
+    #         marker="x", s=50, label="end (ref)")
+
+    # ax.set_xlabel("x [m]")
+    # ax.set_ylabel("y [m]")
+    # ax.axis("equal")
+    # ax.legend()
+    # ax.set_title("Aligned Trajectories (XY projection)")
+
+    # plt.tight_layout()
+    # plt.savefig("traj_compare.png", dpi=300)
+    # plt.close()
+
+
     print(result)
     T = result.np_arrays["alignment_transformation_sim3"]
     sR = T[:3, :3]                    
@@ -498,6 +561,7 @@ def evaluate(
             use_pose_pred=use_pose_pred,
             img_timestamps_all=img_timestamps,
             enable_timing = enable_timing,
+            save_slam_steps_path =  save_encoder_path,
         )
         save_res = partial(save_results, scene=scene_name, eval_type="full_data")
 

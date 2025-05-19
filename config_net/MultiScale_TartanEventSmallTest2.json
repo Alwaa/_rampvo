@@ -36,7 +36,9 @@
             "all_events_in_sequence": true,
             "dataset_name": "TartanEvent",
             "test_split": [
-                "datasets/TartanEvent/ocean/Hard/P003"
+                "datasets/TartanEvent/ocean/Hard/P003",
+                "datasets/TartanEvent/seasidetown/Easy/P002",
+                "datasets/TartanEvent/seasonsforest/Easy/P001"                
             ],
             "use_pose_pred": false
         }
