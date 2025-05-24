@@ -228,11 +228,21 @@ class XRVIO:
                 't': t_opt,
                 'v': prev['v'] + self.preint.delta_v
             }
+
             self.states.append(new_state)
             self.tracker.init_frame(img)
 
+
+            # 3) VG-BA
+            print("VG-BA START")
+            self.vg_ba_g2o()
+            print("VG-BA END")
+
             # 4) VA-Align and VI-BA
             self.va_align()
+
+
+            # 5) VI-BA
             print("BA START")
             self.vi_ba_g2o()
             print("BA END")
@@ -328,8 +338,24 @@ class XRVIO:
 
         # unpack solution
         v_list = [ sol[3*k:3*k+3] for k in range(N) ]  # velocities
-        s_est  = sol[3*N]                              # scale
+        raw_s  = sol[3*N]                              # scale
         g_est  = sol[3*N+1:3*N+4]                      # gravity
+
+        # ——— CLAMP THE SCALE ———
+        # absolute bounds
+        min_s, max_s = 0.0001, 100.0  
+        s_clamped = float(np.clip(raw_s, min_s, max_s))
+
+        # optional relative‐to‐previous bound
+        if self.logs['imu']:
+            prev_s = self.logs['imu'][-1].get('scale', 1.0)
+            rel_min = prev_s * 0.5
+            rel_max = prev_s * 2.0
+            s_clamped = float(np.clip(s_clamped, rel_min, rel_max))
+
+        # now use s_clamped instead of raw_s
+        s_est = s_clamped
+        print(f"VA Align raw_s={raw_s:.3f} → clamped to {s_est:.3f}")
 
         # apply scale to all visual positions
         for k in range(N+1):
@@ -348,6 +374,88 @@ class XRVIO:
             'gravity': g_est.copy()
         })
         print(f"VA Align → scale={s_est:.4f}, gravity={g_est}")
+    
+    def vg_ba_g2o(self):
+        """
+        Visual-Gyro Bundle Adjustment:
+        Jointly refine poses and landmarks using visual reprojection and
+        gyroscope rotation constraints (bias fixed to zero).
+        """
+        # 1) set up optimizer
+        opt = g2o.SparseOptimizer()
+        solver = g2o.LinearSolverDenseSE3()
+        block = g2o.BlockSolverSE3(solver)
+        algo = g2o.OptimizationAlgorithmLevenberg(block)
+        opt.set_algorithm(algo)
+        opt.set_verbose(False)
+
+        # camera param
+        f = float(self.K[0,0]); pp=np.array([[self.K[0,2]],[self.K[1,2]]])
+        cam = g2o.CameraParameters(f, pp, 0.0)
+        cam.set_id(0)
+        opt.add_parameter(cam)
+
+        # sliding window
+        start = max(0, len(self.states)-self.window)
+        idxs = list(range(start, len(self.states)))
+
+        # add pose vertices
+        for i in idxs:
+            R_i = self.states[i]['R']; t_i = self.states[i]['t'].reshape(3,1)
+            se3 = g2o.SE3Quat(R_i, t_i)
+            v = g2o.VertexSE3Expmap(); v.set_id(i*2)
+            v.set_estimate(se3); v.set_fixed(i==start)
+            opt.add_vertex(v)
+
+        # add landmark vertices
+        for lm_id, P3 in self.landmarks.items():
+            vp = g2o.VertexPointXYZ(); vp.set_id(lm_id*2+1)
+            vp.set_estimate(np.array(P3)); vp.set_marginalized(True)
+            opt.add_vertex(vp)
+
+        # add reprojection edges
+        for i in idxs:
+            for lm_id, uv in zip(self.landmarks.keys(), self.tracker.prev_pts):
+                eid=lm_id*2+1 
+                pid=i*2
+                e = g2o.EdgeProjectXYZ2UV()
+                e.set_vertex(0,opt.vertex(eid)) 
+                e.set_vertex(1,opt.vertex(pid))
+                e.set_measurement(uv); e.set_information(np.eye(2))
+                e.set_parameter_id(0,0); opt.add_edge(e)
+
+        # add gyro rotation edges between consecutive poses
+        for j in range(len(idxs)-1):
+            i0, i1 = idxs[j], idxs[j+1]
+            # get preintegrated rotation
+            imu_t, acc, gyro = self.imu_slices[i1]
+            pre = IMUPreintegrator(self.dt); pre.integrate_batch(acc, gyro)
+            R_meas = pre.delta_R
+            # create binary SE3 edge with rotation measurement
+            edge = g2o.EdgeSE3()
+            edge.set_vertex(0, opt.vertex(i0*2))
+            edge.set_vertex(1, opt.vertex(i1*2))
+            # convert to Isometry3d (rotation + zero translation)
+            meas = g2o.Isometry3d(R_meas, np.zeros(3))
+            edge.set_measurement(meas)
+            # information matrix for 6D (rot+trans); we only trust rotation here
+            info = np.eye(6)
+            # optionally downweight translation terms
+            info[3:,3:] *= 0.0
+            edge.set_information(info)
+            opt.add_edge(edge)
+
+        # optimize
+        opt.initialize_optimization(); opt.optimize(5)
+
+        # unpack refined poses
+        for i in idxs:
+            est=opt.vertex(i*2).estimate()
+            R_opt, t_opt = est.rotation(), est.translation().flatten()
+            self.states[i]['R']=R_opt; self.states[i]['t']=t_opt
+
+        # no change to landmarks (optional) or bias
+        print("VG-BA complete")
 
     def vi_ba_g2o(self):
         """

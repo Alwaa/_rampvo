@@ -346,7 +346,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
             if mask:
                 img_timestamps.append(f_i)
             
-            if t == 40:
+            if t == 60:
                 print("TESTING EARLY")
                 break
     else:
