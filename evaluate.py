@@ -23,6 +23,9 @@ import evo.main_ape as main_ape
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 
+import matplotlib.pyplot as plt
+from evo.tools import plot
+
 from ramp.lietorch.groups import SE3
 from utils.seed_everything import seed_everything
 from ramp.data_readers.TartanEvent import TartanEvent
@@ -43,6 +46,7 @@ from ramp.utils import (
 )
 from ramp.config import cfg as VO_cfg
 from ramp.Ramp_vo import Ramp_vo
+from new_xrvio import XRVIO
 
 from config import (
     QUEUE_BUFFER_SIZE,
@@ -318,7 +322,10 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
 
     img_timestamps = []
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
-    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
+    if IMU_TESTING:
+        slam = XRVIO(0.0033333333333333) #dt hardcoded for now
+    else:
+        slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
 
     evaluation_iter_bar = atqdm(_queue_iterator(data_queue))
     evaluation_iter_bar.set_description("Async Evaluating")
@@ -329,11 +336,19 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         async for (image, events, intrinsics, mask, f_i, imu_tuple) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
-                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics, curr_imu_data=imu_tuple, save_slam_steps_path = save_slam_steps_path)
+                slam(t, 
+                     input_tensor=(events, image, mask), 
+                     intrinsics=intrinsics, 
+                     curr_imu_data=imu_tuple, 
+                     save_slam_steps_path = save_slam_steps_path)
             t += 1
         
             if mask:
                 img_timestamps.append(f_i)
+            
+            if t == 40:
+                print("TESTING EARLY")
+                break
     else:
         async for (image, events, intrinsics, mask, f_i) in evaluation_iter_bar:
             image, events = resize_input(image, events)
@@ -343,22 +358,15 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         
             if mask:
                 img_timestamps.append(f_i)
-    
-    # with Timer("FinalUpdates", enabled=enable_timing):
-    #     for _ in range(12):
-    #             slam.update()
+
     
     if t == 0:
         return None
 
-    points = slam.points_.cpu().numpy()[:slam.m]
-    colors = slam.colors_.view(-1, 3).cpu().numpy()[:slam.m]
     poses, tstamps = slam.terminate()
-    return poses, tstamps, points, colors, img_timestamps
 
-import numpy as np
-import matplotlib.pyplot as plt
-from evo.tools import plot
+    return poses, tstamps, img_timestamps
+
 
 def async_evaluate_sequence(
     config_VO, net, eval_cfg, data_queue: Queue, traj_ref, use_pose_pred, img_timestamps_all, enable_timing = False, save_slam_steps_path = None
@@ -372,7 +380,17 @@ def async_evaluate_sequence(
         if res is None:
             return None
         
-        traj_est, _tstamps, points, colors, frame_indecies = res
+        traj_est, _tstamps, frame_indecies = res
+
+
+
+    n = len(traj_est)  #cuttoff for testing        
+
+    traj_ref = PoseTrajectory3D( 
+        positions_xyz            = traj_ref.positions_xyz[:n],
+        orientations_quat_wxyz   = traj_ref.orientations_quat_wxyz[:n],
+        timestamps               = traj_ref.timestamps[:n]
+    )
 
     traj_est_ = PoseTrajectory3D(
         positions_xyz=traj_est[:, :3],
@@ -380,7 +398,7 @@ def async_evaluate_sequence(
         timestamps=img_timestamps_all[frame_indecies],
     )
 
-    save_output_for_COLMAP("colmap_saving", traj_est_, points, colors, fx, fy, cx, cy)
+    # save_output_for_COLMAP("colmap_saving", traj_est_, points, colors, fx, fy, cx, cy)
 
     try:
         traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est_)

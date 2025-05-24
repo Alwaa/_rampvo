@@ -14,8 +14,7 @@ from .utils import preprocess_input, filter_features
 from . import projective_ops as pops
 from collections import OrderedDict
 
-from xrvio_init.solver import initialize as xrvio_initialize
-from xrvio_init.bundle_adjustment import bundle_adjustment
+
 import transforms3d.quaternions as tq
 
 
@@ -100,25 +99,6 @@ class Ramp_vo:
 
         # store relative poses for removed frames
         self.delta = {}
-
-        #=============================================#
-
-        # TODO: Integrate to the BA
-        # 6-vector (deltas) [p, v] per key-frame, initialized to zero
-        self.inertial_prior = torch.zeros(self.N, 6, dtype=torch.float, device="cuda")
-
-        # how many frames to gather
-        self.init_window = 8  
-        # buffers for Python init
-        #self._init_frames = []
-        self.imu_window_lenghts = []
-        self.imu_ts_buffer = []
-        self.imu_gyro_buffer = []
-        #self._init_acc_ts = []
-        self.imu_acc_buffer = []
-        self._init_K = None   # camera intrinsics
-
-        self.imu_ts_frames = []
 
     def load_weights(self, network):
         # load network from checkpoint file
@@ -336,95 +316,6 @@ class Ramp_vo:
 
                 self.last_weight = weight.clone()
         
-        ###########################################
-
-        print("TARTGET START: ", target.shape)
-        # 1) grab centers and targets, reshape into [K,2] numpy arrays
-        centers =   coords[0, :, self.P//2, self.P//2].cpu().numpy()  # (K,2)
-        targets = target[0].cpu().numpy()                             # (K,2)
-        print("TARGETS: ", targets.shape)
-
-        # # 2) optionally filter out-of-bounds
-        # H, W = self.ht//4, self.wd//4   # feature‐map resolution
-        # valid = (targets[:,0]>=0)&(targets[:,0]<W)&(targets[:,1]>=0)&(targets[:,1]<H)
-        # pts1, pts2 = centers[valid], targets[valid]
-        # print(centers)
-        # print(targets)
-        pts1, pts2 = centers[:, :2] , targets[:, :2] 
-        print("WEIGHT: ", weight.shape)
-        w = weight[0].cpu().numpy() 
-        print("W: ", w.shape)
-        # print("=======")
-        # print(pts1)
-        # print(pts2)
-        # pts1, pts2 = pts1, pts2
-
-        # 3) assemble the matches dict for each consecutive frame-pair (i,i+1)
-        matches = {}
-        weights = {}
-        for k,(i,j) in enumerate(zip(self.ii.cpu().tolist(),
-                                    self.jj.cpu().tolist())):
-            # pick out only those matches belonging to this edge
-            mask_k = (self.ii==i)&(self.jj==j)
-            mask_k = mask_k.cpu()
-            matches[(i,j)] = (
-                pts1[mask_k],   # (Ni_j,2)
-                pts2[mask_k]    # (Ni_j,2)
-            )
-            weights[(i,j)] = w[mask_k]
-            # weights[(int(i),int(j))] = w[mask_k]
-
-        # 4) call your XR-VIO solver with these learned matches
-        ts_np   = np.asarray(self.imu_ts_buffer, dtype=float)      # (M,)
-        gyro_np = np.asarray(self.imu_gyro_buffer, dtype=float)    # (M,3)
-        acc_np  = np.asarray(self.imu_acc_buffer, dtype=float)   # (M,3)
-
-        assert ts_np.ndim == 1,    f"ts_np.ndim={ts_np.ndim}, expected 1"
-        assert gyro_np.ndim == 2,  f"gyro_np.ndim={gyro_np.ndim}, expected 2"
-        assert gyro_np.shape[1] == 3, f"gyro_np.shape={gyro_np.shape}, expected (N,3)"
-        assert acc_np.ndim == 2 and acc_np.shape[1] == 3
-
-        R_dict, t_dict, bias_a, gravity, weights_x, scale = xrvio_initialize(
-            imu_ts   = {'gyro': ts_np, 'acc': ts_np},
-            frame_ts = self.imu_ts_frames,
-            gyro_meas= gyro_np,
-            acc_meas = acc_np,
-            K        = self._init_K,
-            matches  = matches,
-            weights = weights,
-            frames   = None,                       # skip built-in ORB matching
-        )
-
-        print("SCALE: ", scale)
-        for key, t_unit in t_dict.items():
-            t_dict[key] = t_unit * scale
-
-        # MAIN2) build absolute poses via your BA
-        abs_poses = bundle_adjustment(R_dict, t_dict, max_iterations=10, weights=weights_x)
-
-        # MAIN3) write into RAMP-VO's pose buffer
-        for idx, (R, t) in abs_poses.items():
-            print("INDEX: ", idx)
-            # convert R→quaternion [x,y,z,w]
-            q_wxyz = tq.mat2quat(R)         # [w,x,y,z]
-            q_xyzw = np.array([q_wxyz[1],q_wxyz[2],q_wxyz[3],q_wxyz[0]])
-            # fill translation and quaternion:
-            self.poses_[idx, :3]   = torch.from_numpy(t).cuda()
-            self.poses_[idx, 3:7]  = torch.from_numpy(q_xyzw).cuda()
-        
-        # ─────────────── C) overwrite RAMP-VO’s pose buffer ───────────────
-        # # self.poses_: Tensor [W×7] = [x,y,z,qx,qy,qz,qw]
-        # for idx,(R_i,t_i) in abs_poses.items():
-        #     # quaternion [w,x,y,z]
-        #     wxyz = transforms3d.quaternions.mat2quat(R_i)
-        #     xyzw = torch.tensor([wxyz[1],wxyz[2],wxyz[3],wxyz[0]],
-        #                         device=self.poses_.device)
-        #     self.poses_[idx,:3]  = torch.from_numpy(t_i).to(self.poses_.device)
-        #     self.poses_[idx,3:7] = xyzw
-
-
-        ############################################
-
         with Timer("Update.BA", enabled=self.enable_timing):
             t0 = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
             t0 = max(t0, 1)
@@ -516,7 +407,6 @@ class Ramp_vo:
             fn = os.path.join(save_slam_steps_path, f"{tstamp:06d}_patchify.pt")
             torch.save(dump, fn)
 
-
         #################################################################################
 
         if len(input_) > 2:
@@ -598,96 +488,31 @@ class Ramp_vo:
             self.imu_gyro_buffer.extend(gyro.tolist())
             self.imu_acc_buffer.extend(acc.tolist())
 
-            # print(curr_imu_data)
-            # print(imu_ts.tolist(),gyro.tolist(),acc.tolist())
 
         # update number of keyframes and number of total patches
         self.n += 1
         self.m += self.M
-
-        # # TODO: Import drt preintegration?
-        # if self.use_imu: # and len(self.imu_buf) > 1:
-
-        #     delta = drt.preintegrate(
-        #         list(self.imu_buf),
-        #         self.bg.cpu().numpy(),  # gyro bias
-        #         self.ba.cpu().numpy(),  # accel bias
-        #     )
-
-        #     dR = torch.as_tensor(delta.dR, device="cuda", dtype=self.poses_.dtype)
-        #     dv = torch.as_tensor(delta.dv, device="cuda", dtype=self.poses_.dtype)
-        #     dp = torch.as_tensor(delta.dp, device="cuda", dtype=self.poses_.dtype)
-
-        #     self.poses_[self.n-1, :3] = ((SE3(self.poses_[self.n-2]).rot() @ dR).reshape(-1))
-            
-        #     self.inertial_prior[self.n-1] = torch.cat([dp, dv], dim=0)
-
 
         with Timer("SLAM.AddEdges", enabled=self.enable_timing):
             # add edges to the graph
             self.append_factors(*self.__edges_forw())
             self.append_factors(*self.__edges_back())
 
-        # matches_np = {}
-        # window_size = 8
-        # for i in range(window_size-1):
-        #     # 1) extract your two frames (as torch tensors)
-        #     img_i = self.frame_buffer[i]     # shape [1,C,H,W]
-        #     img_j = self.frame_buffer[i+1]
 
-        #     # 2) get feature maps and pixel‐coords
-        #     feats_i, uv_i = filter_features(preprocess_input(img_i))
-        #     feats_j, uv_j = filter_features(preprocess_input(img_j))
-        #     # uv_i is shape [N,2] in image‐pixel units
+        # initialize with 8 valid frames and do 12 slam updates
+        if self.n == 8 and not self.is_initialized:
+            with Timer("SLAM.NotInitializedUpdate", enabled=self.enable_timing):
+                self.is_initialized = True
 
-        #     # 3) compute learned offsets
-        #     offsets = altcorr.multi_scale_search(feats_i, feats_j)  # [N,2]
+                for itr in range(12):
+                    self.update()
 
-        #     # 4) turn into NumPy arrays
-        #     pts1 = uv_i.cpu().numpy()             # (N,2)
-        #     pts2 = (uv_i + offsets).cpu().numpy() # (N,2)
-
-        #     # 5) only keep good ones (e.g. within image bounds):
-        #     H, W = img_i.shape[-2:]
-        #     valid = (pts2[:,0]>=0)&(pts2[:,0]<W)&(pts2[:,1]>=0)&(pts2[:,1]<H)
-        #     pts1, pts2 = pts1[valid], pts2[valid]
-
-        #     matches_np[(i, i+1)] = (pts1, pts2)
-    
-
-        # if self.n + 1 == self.init_window and not self.is_initialized:
-
-
-        # # initialize with 8 valid frames and do 12 slam updates
-        # if self.n == 8 and not self.is_initialized:
-        #     with Timer("SLAM.NotInitializedUpdate", enabled=self.enable_timing):
-        #         self.is_initialized = True
-
-        #         for itr in range(12):
-        #             self.update()
-
-        if self.n > 8 or self.is_initialized:
+        elif self.is_initialized:
             with Timer("SLAM.InitializedUpdate", enabled=self.enable_timing):
                 self.update()
             with Timer("SLAM.InitializedKeyframe", enabled=self.enable_timing):
                 self.keyframe()
 
-            self._remove_last_imu()
-
+        # if not time=8 and not SLAM initialized do nothing
         else:
-            # if not time=8 and not SLAM initialized do nothing
             pass
-
-    def _remove_last_imu(self):
-        window_size = 26 #10
-        if len(self.imu_window_lenghts) < window_size:
-            print("SMAL")
-            return
-        print("TRIMMING")
-        slice_up_to = self.imu_window_lenghts.pop(0)
-        print(slice_up_to, len(self.imu_ts_buffer))
-        # self.imu_ts_frames = self.imu_ts_frames[slice_up_to:]
-        self.imu_ts_buffer = self.imu_ts_buffer[slice_up_to:]
-        self.imu_acc_buffer = self.imu_acc_buffer[slice_up_to:]
-        self.imu_gyro_buffer = self.imu_gyro_buffer[slice_up_to:]
-        print(len(self.imu_gyro_buffer), len(self.imu_acc_buffer), len(self.imu_ts_buffer))
