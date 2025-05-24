@@ -139,52 +139,7 @@ class XRVIO:
             return pts.copy()
         pts_n = cv2.undistortPoints(pts.reshape(-1,1,2), self.K, self.dist)
         return pts_n.reshape(-1,2)
-    
-    def __vg_pnp_solve(self, pts_3d, pts_2d, R_pred, K, dist_coeffs=None):
-        """
-        Visual-Gyro PnP: solve for pose given 3D-2D correspondences and gyro-based prior rotation.
-        Inputs:
-        - pts_3d: (N,3) array of 3D landmark positions in visual frame
-        - pts_2d: (N,2) array of corresponding image points
-        - R_pred: (3,3) numpy array, predicted rotation from IMU preintegration
-        - K:    (3,3) camera intrinsic matrix
-        - dist_coeffs: (k,) distortion coefficients or None
-        Returns:
-        - R_opt: (3,3) optimized rotation matrix
-        - t_opt: (3,) optimized translation vector
-        """
-        # 1. Convert predicted rotation to Rodrigues vector
-        rvec_prior, _ = cv2.Rodrigues(R_pred)
-        # 2. Prepare inputs for solvePnP
-        object_points = pts_3d.astype(np.float64)
-        image_points  = pts_2d.astype(np.float64)
-        # 3. Run solvePnP with prior as initial guess
-        success, rvec, tvec = cv2.solvePnP(
-            object_points,
-            image_points,
-            K,
-            dist_coeffs if dist_coeffs is not None else np.zeros((4,1)),
-            rvec_prior,
-            None,
-            True,
-            flags=cv2.SOLVEPNP_ITERATIVE
-        )
-        if not success:
-            # fallback: try without prior
-            success, rvec, tvec = cv2.solvePnP(
-                object_points,
-                image_points,
-                K,
-                dist_coeffs if dist_coeffs is not None else np.zeros((4,1)),
-                None,
-                None,
-                False,
-                flags=cv2.SOLVEPNP_ITERATIVE
-            )
-        # 4. Convert back to rotation matrix
-        R_opt, _ = cv2.Rodrigues(rvec)
-        t_opt = tvec.flatten()
-        return R_opt, t_opt
+
     
     def vg_pnp_solve(self, pts_3d, pts_2d, R_pred, K, dist_coeffs=None):
         """
@@ -319,63 +274,6 @@ class XRVIO:
             X = Vt[-1]
             X/=X[3]
             self.landmarks[i] = X[:3]
-
-    def __degenerate_va_align(self):
-        print("VA Align START")
-        # Loosely-coupled scale estimation using imu_slices
-        N = min(self.window, len(self.states)-1)
-        num, den = 0.0, 0.0
-        for i in range(-N-1, -1):
-            si = self.states[i]
-            sj = self.states[i+1]
-            imu_t, acc, gyro = self.imu_slices[i+1]
-            pre = IMUPreintegrator(self.dt)
-            pre.integrate_batch(acc, gyro)
-            dp = pre.delta_p
-            dt = imu_t[-1]-imu_t[0]
-            num += dp.dot(sj['t']-si['t'])
-            den += dp.dot(dp)
-        scale = num/den if den>0 else 1.0
-        for st in self.states:
-            st['t'] *= scale
-        self.logs['imu'].append(scale)
-        print("VA Align END")
-
-    def __va_align(self):
-        """
-        Loosely-coupled scale estimation using IMU preintegrations.
-        Improved robustness via per-segment scale and median filtering.
-        """
-        N = min(self.window, len(self.states)-1)
-        scales = []
-        # collect individual scale candidates
-        for i in range(-N-1, -1):
-            si = self.states[i]
-            sj = self.states[i+1]
-            imu_t, acc, gyro = self.imu_slices[i+1]
-            pre = IMUPreintegrator(self.dt)
-            pre.integrate_batch(acc, gyro)
-            dp = pre.delta_p
-            dx = sj['t'] - si['t']
-            denom = float(dp.dot(dp))
-            # skip degenerate segments
-            if denom > 1e-6 and np.isfinite(denom):
-                num = float(dp.dot(dx))
-                scales.append(num / denom)
-        # choose robust scale (median) or default to 1
-        if scales:
-            scale = float(np.median(scales))
-            # clamp scale to reasonable range
-            scale = np.clip(scale, 0.1, 10.0)
-        else:
-            scale = 1.0
-        # apply scale to all states' positions
-        for st in self.states:
-            if np.all(np.isfinite(st['t'])):
-                st['t'] = st['t'] * scale
-        # log the robust scale
-        self.logs['imu'].append(scale)
-        print(f"VA Align scale: {scale:.4f}")
     
     def va_align(self):
         """
