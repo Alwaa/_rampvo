@@ -23,11 +23,6 @@ from g2o import (
 )
 
 NANOSECONDS_TO_SECONDS = 1e-9
-MAX_PREINTEGRATION_TRANSLATION_NORM = 1000.0 # Max meters for delta_p
-MAX_PREINTEGRATION_VELOCITY_NORM = 1000.0  # Max m/s for delta_v
-MAX_STATE_TRANSLATION_NORM = 1e6 # Max meters for state t
-MAX_STATE_VELOCITY_NORM = 1e3   # Max m/s for state v
-
 
 def load_camera_params(config_path):
     with open(config_path, 'r') as f:
@@ -50,15 +45,17 @@ def is_rotation_matrix_valid(R_mat):
         return False
     should_be_identity = R_mat.T @ R_mat
     identity = np.identity(3)
-    if not np.allclose(should_be_identity, identity, atol=1e-3): 
+    if not np.allclose(should_be_identity, identity, atol=1e-3): # Looser tolerance for after BA
+        # print(f"Rotation matrix orthogonality check failed. R.T @ R:\n{should_be_identity}")
         return False
     if not np.isclose(np.linalg.det(R_mat), 1.0, atol=1e-3):
+        # print(f"Rotation matrix determinant check failed. det(R): {np.linalg.det(R_mat)}")
         return False
     return True
 
 
 class IMUPreintegrator:
-    def __init__(self, dt_seconds): 
+    def __init__(self, dt_seconds): # dt is the IMU sampling period in seconds
         self.dt = dt_seconds 
         self.delta_R_raw = np.eye(3)
         self.delta_v_raw = np.zeros(3)
@@ -76,39 +73,24 @@ class IMUPreintegrator:
 
 
     def integrate_batch(self, acc_batch, gyro_batch):
+        # Assumes self.dt is the time delta for EACH IMU measurement in the batch
         for acc, gyro in zip(acc_batch, gyro_batch):
             if not np.isfinite(gyro).all():
-                # print(f"IMUPreintegrator: Non-finite gyro: {gyro}")
                 continue
             try:
                 dR = R.from_rotvec(gyro * self.dt).as_matrix()
             except Exception as e:
-                # print(f"IMUPreintegrator: Rotation error from gyro {gyro}: {e}")
                 dR = np.eye(3) 
 
             self.delta_R_raw = self.delta_R_raw @ dR 
             
             if not np.isfinite(acc).all():
-                # print(f"IMUPreintegrator: Non-finite acc: {acc}")
                 continue
 
-            if not is_rotation_matrix_valid(self.delta_R_raw):
-                # print("IMUPreintegrator: delta_R_raw became invalid mid-batch. Resetting to identity.")
-                self.delta_R_raw = np.eye(3) 
-
             acc_world = self.delta_R_raw @ acc 
-            
-            prev_delta_v_raw = self.delta_v_raw.copy() 
+            self.delta_p_raw += self.delta_v_raw * self.dt + 0.5 * acc_world * self.dt**2
             self.delta_v_raw += acc_world * self.dt
-            self.delta_p_raw += prev_delta_v_raw * self.dt + 0.5 * acc_world * self.dt**2
-            
-            if np.linalg.norm(self.delta_v_raw) > MAX_PREINTEGRATION_VELOCITY_NORM:
-                # print(f"IMUPreintegrator: Clamping delta_v_raw from {np.linalg.norm(self.delta_v_raw)}")
-                self.delta_v_raw = (self.delta_v_raw / np.linalg.norm(self.delta_v_raw)) * MAX_PREINTEGRATION_VELOCITY_NORM
-            if np.linalg.norm(self.delta_p_raw) > MAX_PREINTEGRATION_TRANSLATION_NORM:
-                # print(f"IMUPreintegrator: Clamping delta_p_raw from {np.linalg.norm(self.delta_p_raw)}")
-                self.delta_p_raw = (self.delta_p_raw / np.linalg.norm(self.delta_p_raw)) * MAX_PREINTEGRATION_TRANSLATION_NORM
-
+        
         self.delta_R = self.delta_R_raw.copy()
         self.delta_v = self.delta_v_raw.copy()
         self.delta_p = self.delta_p_raw.copy()
@@ -172,7 +154,7 @@ class FeatureTracker:
 
 
 class XRVIO:
-    def __init__(self, imu_sample_period_sec, window=10, cam_config = None, imu_dead_reckoning=True): 
+    def __init__(self, imu_sample_period_sec, window=10, cam_config = None): # Renamed dt to imu_sample_period_sec
         if cam_config is not None:
             self.K, self.dist = load_camera_params(cam_config)
         else:
@@ -180,7 +162,7 @@ class XRVIO:
             self.dist = np.zeros(5)
             print("Warning: Camera config not provided. Using default identity K and zero distortion.")
 
-        self.imu_dt = imu_sample_period_sec 
+        self.imu_dt = imu_sample_period_sec # IMU sampling period in seconds
         self.preint = IMUPreintegrator(self.imu_dt) 
         self.tracker = FeatureTracker()
         
@@ -190,13 +172,9 @@ class XRVIO:
         
         self.landmarks = {}      
         
-        self.initialized = False # For VIO mode
-        self.imu_dead_reckoning_mode = imu_dead_reckoning
-        if self.imu_dead_reckoning_mode:
-            print("XRVIO initialized in IMU Dead Reckoning Mode.")
-
+        self.initialized = False
         self.logs = {'reproj': [], 'imu': []}
-        self.gravity = np.array([0,0,-9.81]) # World frame gravity
+        self.gravity = np.array([0,0,-9.81]) 
 
     def undistort_points(self, pts):
         if pts is None or len(pts) == 0:
@@ -259,60 +237,18 @@ class XRVIO:
             last_known_time_sec = 0
             if self.states: last_known_time_sec = self.states[-1]['timestamp']
             elif self.finalized_trajectory: last_known_time_sec = self.finalized_trajectory[-1]['timestamp']
-            current_timestamp_sec = last_known_time_sec + (1.0/30.0) # Approx camera frame rate
+            current_timestamp_sec = last_known_time_sec + (1.0/30.0) 
 
         self.preint.reset() 
         self.preint.integrate_batch(imu_acc, imu_gyro) 
         
         if not is_rotation_matrix_valid(self.preint.delta_R):
             self.preint.delta_R = np.eye(3)
-            self.preint.delta_v = np.zeros(3) 
-            self.preint.delta_p = np.zeros(3)
 
-        # --- IMU Dead Reckoning Mode ---
-        if self.imu_dead_reckoning_mode:
-            if not self.states: # First frame in dead reckoning mode
-                print("IMU Dead Reckoning: Initializing first state.")
-                current_R = np.eye(3)
-                current_t = np.zeros(3)
-                current_v = np.zeros(3)
-            else:
-                prev_state = self.states[-1]
-                dt_interval_sec = current_timestamp_sec - prev_state['timestamp']
-                if dt_interval_sec <= 1e-9: dt_interval_sec = self.imu_dt # Use IMU dt if interval is too small
-
-                # Propagate State
-                current_R = prev_state['R'] @ self.preint.delta_R
-                current_v = prev_state['v'] + prev_state['R'] @ self.preint.delta_v + self.gravity * dt_interval_sec
-                current_t = prev_state['t'] + prev_state['v'] * dt_interval_sec + \
-                            0.5 * self.gravity * dt_interval_sec**2 + \
-                            prev_state['R'] @ self.preint.delta_p
-            
-            if not is_rotation_matrix_valid(current_R): current_R = self.states[-1]['R'] if self.states else np.eye(3)
-            if not np.isfinite(current_t).all(): current_t = self.states[-1]['t'] if self.states else np.zeros(3)
-            if not np.isfinite(current_v).all(): current_v = self.states[-1]['v'] if self.states else np.zeros(3)
-
-
-            new_state_data = {
-                'R': current_R, 't': current_t, 'v': current_v,
-                'delta_R': self.preint.delta_R.copy(), # Store for consistency, though not used by DR
-                'delta_v': self.preint.delta_v.copy(),
-                'delta_p': self.preint.delta_p.copy(),
-                'timestamp': current_timestamp_sec
-            }
-            self.states.append(new_state_data)
-
-            if len(self.states) > self.window: # Still use window for finalized_trajectory
-                finalized_state = self.states.pop(0)
-                self.finalized_trajectory.append(finalized_state)
-            
-            return self.states[-1]
-
-        # --- Visual-Inertial Odometry Mode ---
         pts_prev_matched, pts_cur_matched, current_tracked_pts, current_tracked_ids = self.tracker.track(img)
         undistorted_current_tracked_pts = self.undistort_points(current_tracked_pts)
 
-        if not self.initialized: # VIO Initialization
+        if not self.initialized:
             if not self.states: 
                 self.tracker.init_frame(img) 
                 initial_R = np.eye(3)
@@ -360,9 +296,6 @@ class XRVIO:
                 
                 t1_world = self.states[0]['t'] + R0_world @ t1_in_R0_frame 
                 v1_world = self.states[0]['v'] + R0_world @ self.preint.delta_v
-                
-                if np.linalg.norm(t1_world) > MAX_STATE_TRANSLATION_NORM: t1_world = np.zeros(3)
-                if np.linalg.norm(v1_world) > MAX_STATE_VELOCITY_NORM: v1_world = np.zeros(3)
 
                 new_state_data = {
                     'R': R1_world, 't': t1_world, 'v': v1_world,
@@ -386,12 +319,9 @@ class XRVIO:
                     self.va_align() 
                 print("Initialization complete.")
 
-        else: # VIO Tracking
+        else: 
             prev_state = self.states[-1]
-            if not (is_rotation_matrix_valid(prev_state['R']) and \
-                    np.isfinite(prev_state['t']).all() and \
-                    np.isfinite(prev_state['v']).all()):
-                print(f"Warning: Previous state R, t, or v is invalid at t={current_timestamp_sec:.3f}. Attempting to recover or skip.")
+            if not is_rotation_matrix_valid(prev_state['R']):
                 return None
 
             dt_interval_sec = current_timestamp_sec - prev_state['timestamp'] 
@@ -406,12 +336,6 @@ class XRVIO:
                        prev_state['R'] @ self.preint.delta_p
             v_pred_world = prev_state['v'] + self.gravity * dt_interval_sec + \
                        prev_state['R'] @ self.preint.delta_v
-            
-            if not (np.isfinite(t_pred_world).all() and np.isfinite(v_pred_world).all()):
-                print(f"Warning: Predictions (t or v) became non-finite at t={current_timestamp_sec:.3f}. Using previous state values as prediction.")
-                t_pred_world = prev_state['t']
-                v_pred_world = prev_state['v']
-                R_pred_world = prev_state['R'] 
 
             known_ids_global = list(self.landmarks.keys())
             
@@ -429,22 +353,16 @@ class XRVIO:
             R_opt_world, t_opt_world_raw = R_pred_world, None 
             if len(pnp_obj_pts) >= 4:
                 R_pnp, t_pnp = self.vg_pnp_solve(pnp_obj_pts, pnp_img_pts, R_pred_world, self.K, self.dist)
-                if t_pnp is not None and is_rotation_matrix_valid(R_pnp) and np.isfinite(t_pnp).all(): 
+                if t_pnp is not None and is_rotation_matrix_valid(R_pnp): 
                     R_opt_world = R_pnp
                     t_opt_world_raw = t_pnp
             
-            if t_opt_world_raw is None or not np.isfinite(t_opt_world_raw).all():
+            if t_opt_world_raw is None:
                 t_opt_world = t_pred_world
             else:
                 t_opt_world = t_opt_world_raw
             
             v_opt_world = v_pred_world 
-
-            if not (is_rotation_matrix_valid(R_opt_world) and \
-                    np.isfinite(t_opt_world).all() and \
-                    np.isfinite(v_opt_world).all()):
-                print(f"Critical Error: State to be added at t={current_timestamp_sec:.3f} is non-finite or R is invalid. Skipping frame.")
-                return None 
 
             new_state_data = { 
                 'R': R_opt_world, 't': t_opt_world, 'v': v_opt_world,
@@ -555,6 +473,11 @@ class XRVIO:
         A = lil_matrix((n_eqs, n_unknowns), dtype=float)
         b_vec = np.zeros(n_eqs, dtype=float)
         
+        # print_va_align_debug = True 
+        # va_align_debug_count = 0
+        # max_va_align_debug_prints = 3
+
+        all_inputs_finite = True
         for k in range(N): 
             state_k = self.states[k]
             state_k1 = self.states[k+1]
@@ -565,18 +488,39 @@ class XRVIO:
             if not np.isfinite(dt_k_sec):
                 print(f"VA-Align Error: dt_k_sec for interval {k} is not finite ({dt_k_sec}). Using self.imu_dt.")
                 dt_k_sec = self.imu_dt
+                all_inputs_finite = False
+
 
             R_k_world = state_k['R']
             delta_p_bk_bk1 = state_k1['delta_p'] 
             delta_v_bk_bk1 = state_k1['delta_v'] 
+            
             visual_t_diff = state_k1['t'] - state_k['t']
 
+            # Check for non-finite inputs before building A and b
             if not (np.isfinite(visual_t_diff).all() and \
                     is_rotation_matrix_valid(R_k_world) and \
                     np.isfinite(delta_p_bk_bk1).all() and \
                     np.isfinite(delta_v_bk_bk1).all()):
-                print(f"VA-Align Error: Non-finite input detected for interval k={k} when building matrix. Skipping va_align.")
-                return 
+                print(f"VA-Align Error: Non-finite input detected for interval k={k}. Skipping this interval's equations.")
+                all_inputs_finite = False
+                # One option is to skip adding rows for this k, making the system smaller.
+                # Another is to zero out the rows, which might still lead to issues if other parts are huge.
+                # For now, we'll mark that inputs are not all finite and proceed, lsqr might still fail.
+                # A more robust solution would be to not add these rows to A and b.
+                # However, lil_matrix makes selective row skipping tricky without rebuilding.
+                # Let's just flag and proceed for now, relying on lsqr's behavior with potential NaNs from bad rows.
+                # If an input is NaN, the corresponding A or b element will be NaN.
+
+            # --- Start VA-Align Debug Prints ---
+            # if print_va_align_debug and va_align_debug_count < max_va_align_debug_prints:
+            #     print(f"--- VA-Align Debug: Interval k={k} ---")
+            #     print(f"  dt_k_sec: {dt_k_sec:.4f}")
+            #     print(f"  Visual t_diff: {visual_t_diff}")
+            #     print(f"  R_k_world (det: {np.linalg.det(R_k_world):.2f})") # Removed matrix print
+            #     print(f"  delta_p_bk_bk1: {delta_p_bk_bk1}")
+            #     print(f"  delta_v_bk_bk1: {delta_v_bk_bk1}")
+            # --- End VA-Align Debug Prints ---
 
             row_p_start = 6 * k
             A[row_p_start:row_p_start+3, 0] = visual_t_diff
@@ -590,6 +534,10 @@ class XRVIO:
             A[row_v_start:row_v_start+3, 1 + 3*(N+1) : 1 + 3*(N+1)+3] = -dt_k_sec * np.eye(3) 
             b_vec[row_v_start:row_v_start+3] = R_k_world @ delta_v_bk_bk1
         
+        # if print_va_align_debug and va_align_debug_count < max_va_align_debug_prints:
+        #     va_align_debug_count +=1
+
+        # Check A and b_vec for NaNs before calling lsqr
         A_csr = A.tocsr()
         if not np.isfinite(A_csr.data).all() or not np.isfinite(A_csr.indices).all() or not np.isfinite(A_csr.indptr).all():
             print("VA-Align FATAL: Matrix A contains non-finite values before lsqr! Skipping va_align.")
@@ -599,7 +547,8 @@ class XRVIO:
             return
 
         try:
-            sol = lsqr(A_csr, b_vec, damp=1e-3, atol=1e-7, btol=1e-7, iter_lim=max(500, A_csr.shape[1]*3), show=False)[0] 
+            # Added damp parameter to lsqr for regularization
+            sol = lsqr(A_csr, b_vec, damp=1e-4, atol=1e-7, btol=1e-7, iter_lim=max(500, A_csr.shape[1]*3), show=False)[0] 
         except Exception as e:
             print(f"VA Align lsqr failed: {e}")
             return
@@ -932,8 +881,13 @@ class XRVIO:
             raise Exception(f"Unsupported image channel count: {img_squeezed.shape[2]}")
 
         imu_timestamps_ns, imu_acc, imu_gyro = curr_imu_data
+        # print()
+        # print(imu_timestamps_ns[0], "->", imu_timestamps_ns[-1])
+        # print(tstamp_sec)
+        # print("TIMES")
         # Pass imu_timestamps_ns directly, process_frame will handle conversion for its internal current_timestamp_sec
-        _state = self.process_frame(img_gray, imu_timestamps_ns, imu_acc, imu_gyro) 
+        _state = self.process_frame(img_gray, imu_timestamps_ns, imu_acc, imu_gyro)  
+
     
     def terminate(self):
         all_history_for_output = []
@@ -957,7 +911,7 @@ class XRVIO:
         for state_data in all_history_for_output:
             R_val = state_data['R']
             t_val = state_data['t']
-            ts_val = state_data['timestamp'] # Already in seconds
+            ts_val = state_data['timestamp'] # In seconds
 
             if is_rotation_matrix_valid(R_val) and \
                isinstance(t_val, np.ndarray) and np.isfinite(t_val).all():
@@ -978,7 +932,7 @@ class XRVIO:
             return dummy_pose, dummy_tstamp
 
         poses_out = np.array(valid_poses_list)
-        tstamps_out = np.array(valid_tstamps_list, dtype=float)*1e9
+        tstamps_out = np.array(valid_tstamps_list, dtype=float)*1e9 #To output in nanoseconds
         
         if len(tstamps_out) > 1:
             sorted_indices = np.argsort(tstamps_out)

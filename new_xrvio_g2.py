@@ -22,13 +22,6 @@ from g2o import (
     Isometry3d 
 )
 
-NANOSECONDS_TO_SECONDS = 1e-9
-MAX_PREINTEGRATION_TRANSLATION_NORM = 1000.0 # Max meters for delta_p
-MAX_PREINTEGRATION_VELOCITY_NORM = 1000.0  # Max m/s for delta_v
-MAX_STATE_TRANSLATION_NORM = 1e6 # Max meters for state t
-MAX_STATE_VELOCITY_NORM = 1e3   # Max m/s for state v
-
-
 def load_camera_params(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -50,65 +43,61 @@ def is_rotation_matrix_valid(R_mat):
         return False
     should_be_identity = R_mat.T @ R_mat
     identity = np.identity(3)
-    if not np.allclose(should_be_identity, identity, atol=1e-3): 
+    if not np.allclose(should_be_identity, identity, atol=1e-3): # Looser tolerance for after BA
+        # print(f"Rotation matrix orthogonality check failed. R.T @ R:\n{should_be_identity}")
         return False
     if not np.isclose(np.linalg.det(R_mat), 1.0, atol=1e-3):
+        # print(f"Rotation matrix determinant check failed. det(R): {np.linalg.det(R_mat)}")
         return False
     return True
 
 
 class IMUPreintegrator:
-    def __init__(self, dt_seconds): 
-        self.dt = dt_seconds 
+    def __init__(self, dt):
+        self.dt = dt
+        # Store delta_R, delta_v, delta_p for BA
         self.delta_R_raw = np.eye(3)
         self.delta_v_raw = np.zeros(3)
         self.delta_p_raw = np.zeros(3)
         self.reset()
 
     def reset(self):
+        # These are the values used by BA, copied from raw values when an integration period ends.
         self.delta_R = np.eye(3)
         self.delta_v = np.zeros(3)
         self.delta_p = np.zeros(3)
         
+        # Reset raw values for the next integration period
         self.delta_R_raw = np.eye(3)
         self.delta_v_raw = np.zeros(3)
         self.delta_p_raw = np.zeros(3)
 
 
     def integrate_batch(self, acc_batch, gyro_batch):
+        # Integrate into _raw variables
         for acc, gyro in zip(acc_batch, gyro_batch):
+            # Ensure gyro values are finite
             if not np.isfinite(gyro).all():
-                # print(f"IMUPreintegrator: Non-finite gyro: {gyro}")
+                # print("Warning: Non-finite gyro values in preintegration. Skipping this measurement.")
                 continue
             try:
                 dR = R.from_rotvec(gyro * self.dt).as_matrix()
             except Exception as e:
-                # print(f"IMUPreintegrator: Rotation error from gyro {gyro}: {e}")
-                dR = np.eye(3) 
+                # print(f"Warning: Could not create rotation from gyro: {gyro}. Error: {e}. Skipping dR update.")
+                dR = np.eye(3) # No rotation update if gyro is problematic
 
-            self.delta_R_raw = self.delta_R_raw @ dR 
+            self.delta_R_raw = self.delta_R_raw @ dR # Use @ for matrix multiplication for clarity
             
+            # Ensure acc values are finite
             if not np.isfinite(acc).all():
-                # print(f"IMUPreintegrator: Non-finite acc: {acc}")
+                # print("Warning: Non-finite acc values in preintegration. Skipping this measurement.")
                 continue
 
-            if not is_rotation_matrix_valid(self.delta_R_raw):
-                # print("IMUPreintegrator: delta_R_raw became invalid mid-batch. Resetting to identity.")
-                self.delta_R_raw = np.eye(3) 
-
             acc_world = self.delta_R_raw @ acc 
-            
-            prev_delta_v_raw = self.delta_v_raw.copy() 
+            self.delta_p_raw += self.delta_v_raw * self.dt + 0.5 * acc_world * self.dt**2
             self.delta_v_raw += acc_world * self.dt
-            self.delta_p_raw += prev_delta_v_raw * self.dt + 0.5 * acc_world * self.dt**2
-            
-            if np.linalg.norm(self.delta_v_raw) > MAX_PREINTEGRATION_VELOCITY_NORM:
-                # print(f"IMUPreintegrator: Clamping delta_v_raw from {np.linalg.norm(self.delta_v_raw)}")
-                self.delta_v_raw = (self.delta_v_raw / np.linalg.norm(self.delta_v_raw)) * MAX_PREINTEGRATION_VELOCITY_NORM
-            if np.linalg.norm(self.delta_p_raw) > MAX_PREINTEGRATION_TRANSLATION_NORM:
-                # print(f"IMUPreintegrator: Clamping delta_p_raw from {np.linalg.norm(self.delta_p_raw)}")
-                self.delta_p_raw = (self.delta_p_raw / np.linalg.norm(self.delta_p_raw)) * MAX_PREINTEGRATION_TRANSLATION_NORM
-
+        
+        # At the end of the batch copy the integrated values to be used by BA.
         self.delta_R = self.delta_R_raw.copy()
         self.delta_v = self.delta_v_raw.copy()
         self.delta_p = self.delta_p_raw.copy()
@@ -133,23 +122,31 @@ class FeatureTracker:
         return pts
 
     def init_frame(self, img):
+        # For your very first frame: assign fresh IDs
         pts = self.detect(img)
         self.prev_pts = pts
         if pts is not None and len(pts) > 0:
             self.prev_ids = np.arange(len(pts)) + self.next_id
             self.next_id += len(pts)
         else:
-            self.prev_pts = np.array([], dtype=np.float32).reshape(0,2) 
+            self.prev_pts = np.array([], dtype=np.float32).reshape(0,2) # Ensure correct shape
             self.prev_ids = np.array([], dtype=int)
         self.prev_img = img
 
 
     def track(self, img):
+        """
+        Tracks self.prev_pts→current points, maintains IDs.
+        Returns:
+          - pts_prev_matched (K×2), pts_cur_matched (K×2) for two-view init or general use
+          - current_tracked_pts (M×2), current_tracked_ids (M,) for PnP (these are self.prev_pts, self.prev_ids after update)
+        """
         if self.prev_pts is None or len(self.prev_pts) == 0 or self.prev_img is None:
             self.prev_img = img
             if self.prev_pts is None or len(self.prev_pts) == 0:
                  self.init_frame(img) 
             return None, None, self.prev_pts, self.prev_ids
+
 
         pts_cur_all, status, _ = cv2.calcOpticalFlowPyrLK(
             self.prev_img, img, self.prev_pts, None, **self.lk_params
@@ -162,8 +159,11 @@ class FeatureTracker:
 
         pts_prev_matched = self.prev_pts[mask]
         pts_cur_matched  = pts_cur_all[mask] if pts_cur_all is not None else np.array([], dtype=np.float32).reshape(0,2)
+
+        # IDs corresponding to the matched points
         matched_ids  = self.prev_ids[mask]
         
+        # Update history (internal state of the tracker)
         self.prev_pts = pts_cur_matched 
         self.prev_ids = matched_ids
         self.prev_img = img
@@ -172,7 +172,7 @@ class FeatureTracker:
 
 
 class XRVIO:
-    def __init__(self, imu_sample_period_sec, window=10, cam_config = None, imu_dead_reckoning=True): 
+    def __init__(self, dt, window=10, cam_config = None):
         if cam_config is not None:
             self.K, self.dist = load_camera_params(cam_config)
         else:
@@ -180,29 +180,25 @@ class XRVIO:
             self.dist = np.zeros(5)
             print("Warning: Camera config not provided. Using default identity K and zero distortion.")
 
-        self.imu_dt = imu_sample_period_sec 
-        self.preint = IMUPreintegrator(self.imu_dt) 
+        self.dt = dt
+        self.preint = IMUPreintegrator(dt) 
         self.tracker = FeatureTracker()
         
         self.window = window 
-        self.states = []  
-        self.finalized_trajectory = [] 
-        
+        self.states = []         
         self.landmarks = {}      
         
-        self.initialized = False # For VIO mode
-        self.imu_dead_reckoning_mode = imu_dead_reckoning
-        if self.imu_dead_reckoning_mode:
-            print("XRVIO initialized in IMU Dead Reckoning Mode.")
-
+        self.initialized = False
         self.logs = {'reproj': [], 'imu': []}
-        self.gravity = np.array([0,0,-9.81]) # World frame gravity
+        self.tlist = [] 
+        self.gravity = np.array([0,0,-9.81]) # Initial guess for gravity in world frame
 
     def undistort_points(self, pts):
         if pts is None or len(pts) == 0:
             return np.array([])
         if self.dist is None or np.all(self.dist == 0):
             return pts.copy()
+        # Ensure K is float64 for undistortPoints
         K_cv = self.K.astype(np.float64)
         dist_cv = self.dist.astype(np.float64)
         pts_n = cv2.undistortPoints(pts.reshape(-1,1,2), K_cv, dist_cv, None, K_cv) 
@@ -211,30 +207,32 @@ class XRVIO:
     
     def vg_pnp_solve(self, pts_3d, pts_2d, R_pred, K, dist_coeffs=None):
         if len(pts_3d) < 4 or len(pts_2d) < 4:
+            # print("Not enough points for PnP, using prediction.")
             return R_pred, None 
 
         rvec_prior, _ = cv2.Rodrigues(R_pred.astype(np.float64))
         obj = pts_3d.astype(np.float64)
         img = pts_2d.astype(np.float64) 
         dc  = dist_coeffs if dist_coeffs is not None else np.zeros((4,1))
-        K_cv = K.astype(np.float64) 
+        K_cv = K.astype(np.float64) # Ensure K is float64
 
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
             obj, img, K_cv, dc,
-            useExtrinsicGuess=True, rvec=rvec_prior, tvec=None, 
+            useExtrinsicGuess=True, rvec=rvec_prior, tvec=None, # tvec=None is generally OK for solvePnPRansac
             iterationsCount=100, reprojectionError=8.0, confidence=0.99,
             flags=cv2.SOLVEPNP_ITERATIVE 
         )
         
         if not success:
-            initial_tvec_guess = np.zeros((3, 1), dtype=np.float64) 
+            # Fallback to simple solvePnP if RANSAC fails
+            initial_tvec_guess = np.zeros((3, 1), dtype=np.float64) # Default tvec guess
             success, rvec, tvec = cv2.solvePnP(
                 obj, img, K_cv, dc,
-                rvec_prior, initial_tvec_guess, True, 
+                rvec_prior, initial_tvec_guess, True, # useExtrinsicGuess=True
                 flags=cv2.SOLVEPNP_ITERATIVE
             )
         
-        if not success: 
+        if not success: # If still fails, fallback to non-guess iterative
              success, rvec, tvec = cv2.solvePnP(
                 obj, img, K_cv, dc,
                 None, None, False, 
@@ -242,91 +240,46 @@ class XRVIO:
             )
 
         if not success: 
+            # print("PnP failed, using prediction.")
             return R_pred, None
 
         R_opt, _ = cv2.Rodrigues(rvec)
         t_opt = tvec.flatten()
 
         if not is_rotation_matrix_valid(R_opt):
-            return R_pred, None 
+            # print("Warning: PnP resulted in an invalid rotation matrix. Using R_pred instead.")
+            return R_pred, None # Or R_pred, t_opt if t_opt seems reasonable
 
         return R_opt, t_opt
 
-    def process_frame(self, img, imu_timestamps_ns, imu_acc, imu_gyro):
-        if len(imu_timestamps_ns) > 0:
-            current_timestamp_sec = imu_timestamps_ns[-1] * NANOSECONDS_TO_SECONDS
-        else: 
-            last_known_time_sec = 0
-            if self.states: last_known_time_sec = self.states[-1]['timestamp']
-            elif self.finalized_trajectory: last_known_time_sec = self.finalized_trajectory[-1]['timestamp']
-            current_timestamp_sec = last_known_time_sec + (1.0/30.0) # Approx camera frame rate
+    def process_frame(self, img, imu_t, imu_acc, imu_gyro):
+        current_timestamp = imu_t[-1] if len(imu_t) > 0 else (self.tlist[-1] + self.dt if self.tlist else 0)
 
         self.preint.reset() 
-        self.preint.integrate_batch(imu_acc, imu_gyro) 
+        self.preint.integrate_batch(imu_acc, imu_gyro)
         
         if not is_rotation_matrix_valid(self.preint.delta_R):
             self.preint.delta_R = np.eye(3)
-            self.preint.delta_v = np.zeros(3) 
-            self.preint.delta_p = np.zeros(3)
 
-        # --- IMU Dead Reckoning Mode ---
-        if self.imu_dead_reckoning_mode:
-            if not self.states: # First frame in dead reckoning mode
-                print("IMU Dead Reckoning: Initializing first state.")
-                current_R = np.eye(3)
-                current_t = np.zeros(3)
-                current_v = np.zeros(3)
-            else:
-                prev_state = self.states[-1]
-                dt_interval_sec = current_timestamp_sec - prev_state['timestamp']
-                if dt_interval_sec <= 1e-9: dt_interval_sec = self.imu_dt # Use IMU dt if interval is too small
-
-                # Propagate State
-                current_R = prev_state['R'] @ self.preint.delta_R
-                current_v = prev_state['v'] + prev_state['R'] @ self.preint.delta_v + self.gravity * dt_interval_sec
-                current_t = prev_state['t'] + prev_state['v'] * dt_interval_sec + \
-                            0.5 * self.gravity * dt_interval_sec**2 + \
-                            prev_state['R'] @ self.preint.delta_p
-            
-            if not is_rotation_matrix_valid(current_R): current_R = self.states[-1]['R'] if self.states else np.eye(3)
-            if not np.isfinite(current_t).all(): current_t = self.states[-1]['t'] if self.states else np.zeros(3)
-            if not np.isfinite(current_v).all(): current_v = self.states[-1]['v'] if self.states else np.zeros(3)
-
-
-            new_state_data = {
-                'R': current_R, 't': current_t, 'v': current_v,
-                'delta_R': self.preint.delta_R.copy(), # Store for consistency, though not used by DR
-                'delta_v': self.preint.delta_v.copy(),
-                'delta_p': self.preint.delta_p.copy(),
-                'timestamp': current_timestamp_sec
-            }
-            self.states.append(new_state_data)
-
-            if len(self.states) > self.window: # Still use window for finalized_trajectory
-                finalized_state = self.states.pop(0)
-                self.finalized_trajectory.append(finalized_state)
-            
-            return self.states[-1]
-
-        # --- Visual-Inertial Odometry Mode ---
         pts_prev_matched, pts_cur_matched, current_tracked_pts, current_tracked_ids = self.tracker.track(img)
         undistorted_current_tracked_pts = self.undistort_points(current_tracked_pts)
 
-        if not self.initialized: # VIO Initialization
-            if not self.states: 
+        if not self.initialized:
+            if len(self.states) == 0: 
                 self.tracker.init_frame(img) 
                 initial_R = np.eye(3)
                 if not is_rotation_matrix_valid(initial_R): 
                     initial_R = SRot.identity().as_matrix() 
 
-                initial_state_data = {
+                initial_state = {
                     'R': initial_R, 't': np.zeros(3), 'v': np.zeros(3),
                     'delta_R': np.eye(3), 'delta_v': np.zeros(3), 'delta_p': np.zeros(3), 
-                    'timestamp': current_timestamp_sec 
+                    'timestamp': current_timestamp
                 }
-                self.states.append(initial_state_data)
+                self.states.append(initial_state)
+                self.tlist.append(current_timestamp)
                 return None 
-            else: 
+            else: # Attempting initialization (usually second frame)
                 if pts_prev_matched is None or len(pts_prev_matched) < 5 or pts_cur_matched is None or len(pts_cur_matched) < 5: 
                     self.tracker.prev_img = img 
                     return None
@@ -360,58 +313,53 @@ class XRVIO:
                 
                 t1_world = self.states[0]['t'] + R0_world @ t1_in_R0_frame 
                 v1_world = self.states[0]['v'] + R0_world @ self.preint.delta_v
-                
-                if np.linalg.norm(t1_world) > MAX_STATE_TRANSLATION_NORM: t1_world = np.zeros(3)
-                if np.linalg.norm(v1_world) > MAX_STATE_VELOCITY_NORM: v1_world = np.zeros(3)
 
-                new_state_data = {
+                new_state = {
                     'R': R1_world, 't': t1_world, 'v': v1_world,
                     'delta_R': self.preint.delta_R.copy(), 
                     'delta_v': self.preint.delta_v.copy(), 
                     'delta_p': self.preint.delta_p.copy(),
-                    'timestamp': current_timestamp_sec 
+                    'timestamp': current_timestamp
                 }
-                self.states.append(new_state_data)
+                self.states.append(new_state)
+                self.tlist.append(current_timestamp)
                 
                 self.triangulate_landmarks(undistorted_pts0_matched, undistorted_pts1_matched, 
                                            R0_to_R1_imu, t1_in_R0_frame, 
                                            ids_for_matched_points) 
                 
                 self.initialized = True
-                print(f"System Initialized at frame {len(self.finalized_trajectory) + len(self.states)-1}. Performing initial BA and Align.")
-                if len(self.states) >= 2: 
-                    pass
-                if len(self.states) >= 4: 
+                print(f"System Initialized at frame {len(self.states)-1}. Performing initial BA and Align.")
+                # Perform initial VG-BA and VA-Align after first successful triangulation
+                if len(self.states) >= 2: # Should be true here
+                    print("Initial VG-BA...")
+                    self.vg_ba_g2o()
                     print("Initial VA-Align...")
-                    self.va_align() 
+                    self.va_align() # VA-Align needs at least 2 intervals (3 states) but can run with 1 interval (2 states) with modified logic or less accuracy
+                                  # Current va_align needs N>=1, so len(states) >= 2.
+                                  # If va_align is robust enough, call it. Otherwise, wait for more states.
+                                  # For XR-VIO, VA-Align is after VG-SfM (which implies a few frames).
+                                  # Let's assume va_align can run with 2 states (1 interval) for now.
                 print("Initialization complete.")
 
-        else: # VIO Tracking
+
+        else: # System is initialized, normal tracking mode
             prev_state = self.states[-1]
-            if not (is_rotation_matrix_valid(prev_state['R']) and \
-                    np.isfinite(prev_state['t']).all() and \
-                    np.isfinite(prev_state['v']).all()):
-                print(f"Warning: Previous state R, t, or v is invalid at t={current_timestamp_sec:.3f}. Attempting to recover or skip.")
+            if not is_rotation_matrix_valid(prev_state['R']):
                 return None
 
-            dt_interval_sec = current_timestamp_sec - prev_state['timestamp'] 
-            if dt_interval_sec <= 1e-9 : dt_interval_sec = self.imu_dt 
+            dt_interval = current_timestamp - prev_state['timestamp'] if 'timestamp' in prev_state else self.dt 
+            if dt_interval <=0 : dt_interval = self.dt 
 
             R_pred_world = prev_state['R'] @ self.preint.delta_R
             if not is_rotation_matrix_valid(R_pred_world):
                 R_pred_world = prev_state['R'] 
 
-            t_pred_world = prev_state['t'] + prev_state['v'] * dt_interval_sec + \
-                       0.5 * self.gravity * dt_interval_sec**2 + \
+            t_pred_world = prev_state['t'] + prev_state['v'] * dt_interval + \
+                       0.5 * self.gravity * dt_interval**2 + \
                        prev_state['R'] @ self.preint.delta_p
-            v_pred_world = prev_state['v'] + self.gravity * dt_interval_sec + \
+            v_pred_world = prev_state['v'] + self.gravity * dt_interval + \
                        prev_state['R'] @ self.preint.delta_v
-            
-            if not (np.isfinite(t_pred_world).all() and np.isfinite(v_pred_world).all()):
-                print(f"Warning: Predictions (t or v) became non-finite at t={current_timestamp_sec:.3f}. Using previous state values as prediction.")
-                t_pred_world = prev_state['t']
-                v_pred_world = prev_state['v']
-                R_pred_world = prev_state['R'] 
 
             known_ids_global = list(self.landmarks.keys())
             
@@ -429,45 +377,44 @@ class XRVIO:
             R_opt_world, t_opt_world_raw = R_pred_world, None 
             if len(pnp_obj_pts) >= 4:
                 R_pnp, t_pnp = self.vg_pnp_solve(pnp_obj_pts, pnp_img_pts, R_pred_world, self.K, self.dist)
-                if t_pnp is not None and is_rotation_matrix_valid(R_pnp) and np.isfinite(t_pnp).all(): 
+                if t_pnp is not None and is_rotation_matrix_valid(R_pnp): 
                     R_opt_world = R_pnp
                     t_opt_world_raw = t_pnp
             
-            if t_opt_world_raw is None or not np.isfinite(t_opt_world_raw).all():
+            if t_opt_world_raw is None:
                 t_opt_world = t_pred_world
             else:
                 t_opt_world = t_opt_world_raw
             
             v_opt_world = v_pred_world 
 
-            if not (is_rotation_matrix_valid(R_opt_world) and \
-                    np.isfinite(t_opt_world).all() and \
-                    np.isfinite(v_opt_world).all()):
-                print(f"Critical Error: State to be added at t={current_timestamp_sec:.3f} is non-finite or R is invalid. Skipping frame.")
-                return None 
-
-            new_state_data = { 
+            new_state = {
                 'R': R_opt_world, 't': t_opt_world, 'v': v_opt_world,
                 'delta_R': self.preint.delta_R.copy(), 
                 'delta_v': self.preint.delta_v.copy(), 
                 'delta_p': self.preint.delta_p.copy(),
-                'timestamp': current_timestamp_sec 
+                'timestamp': current_timestamp
             }
-            self.states.append(new_state_data)
+            self.states.append(new_state)
+            self.tlist.append(current_timestamp)
 
             if len(self.states) > self.window:
-                finalized_state_for_history = self.states.pop(0) 
-                self.finalized_trajectory.append(finalized_state_for_history) 
+                self.states.pop(0) 
+                self.tlist.pop(0) 
 
-            if self.initialized and len(self.states) == self.window: 
+            # Staged optimization when window is full
+            if len(self.states) == self.window: 
                 # print("VG-BA START (Tracking)")
-                # self.vg_ba_g2o() 
+                # self.vg_ba_g2o()
+                # print("VG-BA END (Tracking)")
                 
-                print("VA-Align START (Tracking)")
-                self.va_align() 
+                # print("VA-Align START (Tracking)")
+                # self.va_align()
+                # print("VA-Align END (Tracking)")
                 
                 print("VI-BA START (Tracking)")
-                self.vi_ba_g2o() 
+                self.vi_ba_g2o() # This is the primary local BA during tracking
+                print("VI-BA END (Tracking)")
         
         return self.states[-1] if self.states else None
 
@@ -542,105 +489,89 @@ class XRVIO:
     
     def va_align(self):
         num_states_in_window = len(self.states)
-        if num_states_in_window < 4: 
-            print(f"VA-Align: Not enough states ({num_states_in_window}). Need at least 4. Skipping.")
+        if num_states_in_window <= 1: # VA Align needs at least 1 interval (2 states)
             return
 
-        N = num_states_in_window - 1 
-        n_unknowns = 1 + 3 * (N + 1) + 3 
-        n_eqs = 6 * N 
+        N = num_states_in_window - 1 # Number of intervals
+        
+        # unknowns: scale (1), N+1 velocities (v0 to vN for states 0 to N), gravity (3)
+        # Total unknowns = 1 (scale) + 3*(N+1) (velocities) + 3 (gravity)
+        n_unknowns = 1 + 3 * (N + 1) + 3
+        # Equations: 3 for pos constraint, 3 for vel constraint, per interval. Total N intervals.
+        n_eqs = 3 * N + 3 * N 
 
-        if n_eqs == 0: return 
+        if n_eqs == 0: return # No intervals to process
 
         A = lil_matrix((n_eqs, n_unknowns), dtype=float)
         b_vec = np.zeros(n_eqs, dtype=float)
-        
-        for k in range(N): 
+
+        # Variable indexing in solution vector 'sol':
+        # sol[0]: scale 's'
+        # sol[1 : 1+3*(N+1)]: velocities v_w_b0, ..., v_w_bN (for self.states[0] to self.states[N])
+        # sol[1+3*(N+1) : 1+3*(N+1)+3]: gravity_world g_w
+
+        for k in range(N): # Loop over N intervals (from state k to state k+1)
             state_k = self.states[k]
             state_k1 = self.states[k+1]
 
-            dt_k_sec = state_k1['timestamp'] - state_k['timestamp'] 
-            if dt_k_sec <= 1e-9: 
-                dt_k_sec = self.imu_dt 
-            if not np.isfinite(dt_k_sec):
-                print(f"VA-Align Error: dt_k_sec for interval {k} is not finite ({dt_k_sec}). Using self.imu_dt.")
-                dt_k_sec = self.imu_dt
+            dt_k = state_k1['timestamp'] - state_k['timestamp']
+            if dt_k <= 1e-9: dt_k = self.dt # Avoid issues with zero or tiny dt
 
             R_k_world = state_k['R']
-            delta_p_bk_bk1 = state_k1['delta_p'] 
-            delta_v_bk_bk1 = state_k1['delta_v'] 
-            visual_t_diff = state_k1['t'] - state_k['t']
+            # IMU preintegration terms (from body k to body k+1), stored in state k+1
+            delta_p_bk_bk1 = state_k1['delta_p'] # in body_k frame
+            delta_v_bk_bk1 = state_k1['delta_v'] # in body_k frame
+            # delta_R_bk_bk1 = state_k1['delta_R'] # Rotation from body_k to body_k+1
 
-            if not (np.isfinite(visual_t_diff).all() and \
-                    is_rotation_matrix_valid(R_k_world) and \
-                    np.isfinite(delta_p_bk_bk1).all() and \
-                    np.isfinite(delta_v_bk_bk1).all()):
-                print(f"VA-Align Error: Non-finite input detected for interval k={k} when building matrix. Skipping va_align.")
-                return 
-
+            # Position constraint: s*(p_w_k1 - p_w_k) - v_w_k*dt_k - 0.5*g_w*dt_k^2 = R_k_world * delta_p_bk_bk1
             row_p_start = 6 * k
-            A[row_p_start:row_p_start+3, 0] = visual_t_diff
-            A[row_p_start:row_p_start+3, 1 + 3*k : 1 + 3*k+3] = -dt_k_sec * np.eye(3)
-            A[row_p_start:row_p_start+3, 1 + 3*(N+1) : 1 + 3*(N+1)+3] = -0.5 * (dt_k_sec**2) * np.eye(3) 
+            # Scale 's' term
+            A[row_p_start:row_p_start+3, 0] = (state_k1['t'] - state_k['t'])
+            # Velocity v_w_bk term (velocity of state_k)
+            A[row_p_start:row_p_start+3, 1 + 3*k : 1 + 3*k+3] = -dt_k * np.eye(3)
+            # Gravity g_w term
+            A[row_p_start:row_p_start+3, 1 + 3*(N+1) : 1 + 3*(N+1)+3] = -0.5 * (dt_k**2) * np.eye(3) # Corrected sign for g
             b_vec[row_p_start:row_p_start+3] = R_k_world @ delta_p_bk_bk1
             
+            # Velocity constraint: v_w_bk+1 - v_w_bk - g_w*dt_k = R_k_world * delta_v_bk_bk1
             row_v_start = 6 * k + 3
+            # Velocity v_w_bk+1 term (velocity of state_k1)
             A[row_v_start:row_v_start+3, 1 + 3*(k+1) : 1 + 3*(k+1)+3] = np.eye(3)
+            # Velocity v_w_bk term
             A[row_v_start:row_v_start+3, 1 + 3*k : 1 + 3*k+3] = -np.eye(3)
-            A[row_v_start:row_v_start+3, 1 + 3*(N+1) : 1 + 3*(N+1)+3] = -dt_k_sec * np.eye(3) 
+            # Gravity g_w term
+            A[row_v_start:row_v_start+3, 1 + 3*(N+1) : 1 + 3*(N+1)+3] = -dt_k * np.eye(3) # Corrected sign for g
             b_vec[row_v_start:row_v_start+3] = R_k_world @ delta_v_bk_bk1
         
-        A_csr = A.tocsr()
-        if not np.isfinite(A_csr.data).all() or not np.isfinite(A_csr.indices).all() or not np.isfinite(A_csr.indptr).all():
-            print("VA-Align FATAL: Matrix A contains non-finite values before lsqr! Skipping va_align.")
-            return
-        if not np.isfinite(b_vec).all():
-            print("VA-Align FATAL: Vector b_vec contains non-finite values before lsqr! Skipping va_align.")
-            return
-
         try:
-            sol = lsqr(A_csr, b_vec, damp=1e-3, atol=1e-7, btol=1e-7, iter_lim=max(500, A_csr.shape[1]*3), show=False)[0] 
+            sol = lsqr(A.tocsr(), b_vec, atol=1e-5, btol=1e-5, iter_lim=max(300, A.shape[1]*2))[0] # Increased iter_lim
         except Exception as e:
-            print(f"VA Align lsqr failed: {e}")
             return
 
         s_est  = sol[0]                              
-        v_list_world = [ sol[1+3*k : 1+3*k+3] for k in range(N+1) ] 
+        v_list_world = [ sol[1+3*k : 1+3*k+3] for k in range(N+1) ] # N+1 velocities
         g_est_world  = sol[1+3*(N+1) : 1+3*(N+1)+3]                     
 
-        print(f"VA-Align estimated: s_raw={s_est:.4f}, g_norm={np.linalg.norm(g_est_world):.4f}, g_vec={g_est_world}")
-
-        if not np.isfinite(s_est) or not np.isfinite(g_est_world).all():
-            print("VA-Align: Solution contains NaN/Inf. Skipping update.")
-            self.logs.setdefault('imu', []).append({'scale': None, 'gravity': None, 's_raw': s_est})
-            return
-
-        if not (8.0 < np.linalg.norm(g_est_world) < 12.0):
-            print(f"VA-Align: Estimated gravity norm {np.linalg.norm(g_est_world):.2f} is unusual. Skipping update.")
-            self.logs.setdefault('imu', []).append({'scale': None, 'gravity': g_est_world.copy(), 's_raw': s_est})
-            return
-
-        min_s, max_s = 0.1, 10.0  
+        min_s, max_s = 0.05, 10.0  # Adjusted bounds for scale
         s_clamped = float(np.clip(s_est, min_s, max_s))
         
         final_s = s_clamped
-        print(f"VA-Align: s_est={s_est:.4f} -> final_s={final_s:.4f}")
 
+        if final_s < 0.05: # If scale is too small, alignment might be unstable
+            return
 
-        if final_s < min_s + 1e-3 : 
-            print(f"VA-Align: Estimated scale {final_s:.4f} is at lower bound. Solution might be unreliable.")
-
+        # Apply scale and update velocities for states in the window
         t_origin_window = self.states[0]['t'].copy() 
-        for i in range(num_states_in_window): 
+        for i in range(num_states_in_window): # Iterate through all states currently in self.states
+            # Scale translations relative to the first pose in the window
             self.states[i]['t'] = t_origin_window + (self.states[i]['t'] - t_origin_window) * final_s
-            self.states[i]['v'] = v_list_world[i] 
+            self.states[i]['v'] = v_list_world[i] # Update with velocities from solution
             
-        self.gravity = g_est_world 
+        self.gravity = g_est_world # Update global gravity estimate
 
         self.logs.setdefault('imu', []).append({
-            'scale': final_s, 
-            'gravity': g_est_world.copy(),
-            's_raw': s_est
+            'scale': final_s if final_s > 0 else None, 
+            'gravity': g_est_world.copy()
         })
     
     def get_g2o_solver(self):
@@ -897,18 +828,15 @@ class XRVIO:
         self.preint.reset()
         self.tracker = FeatureTracker() 
         self.states.clear()
-        self.finalized_trajectory.clear() 
         self.landmarks.clear()
         self.initialized = False
         self.logs = {'reproj': [], 'imu': []} 
+        self.tlist = []
 
 
-    def __call__(self, tstamp_sec, input_tensor, intrinsics, # tstamp is now expected in seconds
+    def __call__(self, tstamp, input_tensor, intrinsics, 
                  curr_imu_data = None, save_slam_steps_path = None):
         
-        # curr_imu_data is (imu_timestamps_ns, imu_acc, imu_gyro)
-        # tstamp_sec is the image timestamp in seconds
-
         if self.K is None or np.all(self.K == np.eye(3)): 
             fx, fy, cx, cy = intrinsics.cpu().numpy()
             self.K = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]], dtype=float)
@@ -931,58 +859,47 @@ class XRVIO:
         else:
             raise Exception(f"Unsupported image channel count: {img_squeezed.shape[2]}")
 
-        imu_timestamps_ns, imu_acc, imu_gyro = curr_imu_data
-        # Pass imu_timestamps_ns directly, process_frame will handle conversion for its internal current_timestamp_sec
-        _state = self.process_frame(img_gray, imu_timestamps_ns, imu_acc, imu_gyro) 
+
+        imu_t, imu_acc, imu_gyro = curr_imu_data
+        _state = self.process_frame(img_gray, imu_t, imu_acc, imu_gyro)
     
     def terminate(self):
-        all_history_for_output = []
-        all_history_for_output.extend(self.finalized_trajectory)
+        if not self.tlist or not self.states:
+            return np.array([]), np.array([])
         
-        for state_in_window in self.states:
-            all_history_for_output.append({
-                'R': state_in_window['R'],
-                't': state_in_window['t'],
-                'timestamp': state_in_window['timestamp'] # Already in seconds
-            })
-
-        if not all_history_for_output:
-            dummy_pose = np.array([[0,0,0, 0,0,0,1]], dtype=float) 
-            dummy_tstamp = np.array([0.0], dtype=float)
-            return dummy_pose, dummy_tstamp
-        
+        num_output_poses = len(self.states)
         valid_poses_list = []
         valid_tstamps_list = []
 
-        for state_data in all_history_for_output:
-            R_val = state_data['R']
-            t_val = state_data['t']
-            ts_val = state_data['timestamp'] # Already in seconds
-
-            if is_rotation_matrix_valid(R_val) and \
-               isinstance(t_val, np.ndarray) and np.isfinite(t_val).all():
+        for i in range(num_output_poses):
+            state = self.states[i]
+            if is_rotation_matrix_valid(state['R']) and \
+               isinstance(state['t'], np.ndarray) and np.isfinite(state['t']).all():
                 try:
-                    rot_q = SRot.from_matrix(R_val).as_quat() 
-                    current_pose = np.concatenate((t_val, rot_q))
+                    rot_q = SRot.from_matrix(state['R']).as_quat() 
+                    current_pose = np.concatenate((state['t'], rot_q))
                     valid_poses_list.append(current_pose)
-                    valid_tstamps_list.append(ts_val)
+                    if i < len(self.tlist): 
+                        valid_tstamps_list.append(self.tlist[i])
+                    else: 
+                        valid_tstamps_list.append(state.get('timestamp', 0.0))
+
                 except np.linalg.LinAlgError:
-                    pass 
+                    print("LINALG ERR")
+                    pass
                 except ValueError as ve: 
+                    print("VALUE ERR")
                     pass
             pass
+
 
         if not valid_poses_list:
             dummy_pose = np.array([[0,0,0, 0,0,0,1]], dtype=float) 
             dummy_tstamp = np.array([0.0], dtype=float)
             return dummy_pose, dummy_tstamp
 
+
         poses_out = np.array(valid_poses_list)
-        tstamps_out = np.array(valid_tstamps_list, dtype=float)*1e9
+        tstamps_out = np.array(valid_tstamps_list, dtype=float)
         
-        if len(tstamps_out) > 1:
-            sorted_indices = np.argsort(tstamps_out)
-            tstamps_out = tstamps_out[sorted_indices]
-            poses_out = poses_out[sorted_indices]
-            
         return poses_out, tstamps_out

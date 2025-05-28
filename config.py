@@ -8,7 +8,7 @@ RAMPVO_ENV = os.environ.get("RAMPVO_ENV", "server").lower()
 # 1200 => Around 10GB; 0 => No bound!
 QUEUE_BUFFER_SIZE = 2400 
 # When to start the evaluation NB! Queue should load faster than is used on avg!
-QUEUE_ASYNC_MIN_SIZE = 1200 
+QUEUE_ASYNC_MIN_SIZE = 120 #1200 
 #Currently test with pose
 IMU_TESTING = True
 #################################
@@ -38,7 +38,7 @@ QUEUE_ASYNC_SLEEP_BETWEEN_STARTUP_CHECKS = 5.0
 
 
 torch.set_num_threads(GENERAL_TORCH_INTRA_OP_THREAD_NUM) # OpenMP/MKL/BLAS
-torch.set_num_interop_threads(4)# Inter-op pool #NOT CURRENTLY A FACTOR? MAYBE FOR TRAINING?
+torch.set_num_interop_threads(LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM)# Inter-op pool #NOT CURRENTLY A FACTOR? MAYBE FOR TRAINING?
 
 print(f"\nThreads:\n\tintra-op:{torch.get_num_threads()} | inter-op: {torch.get_num_interop_threads()}")
 print("CurrentGPU", os.environ.get("CUDA_VISIBLE_DEVICES"))

@@ -36,7 +36,7 @@
             "all_events_in_sequence": true,
             "dataset_name": "TartanEvent",
             "test_split": [
-                "datasets/TartanEvent/ocean/Hard/P003"
+                "datasets/TartanEvent/ocean/Easy/P000"
             ],
             "use_pose_pred": false
         }

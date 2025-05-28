@@ -15,7 +15,6 @@ from . import projective_ops as pops
 from collections import OrderedDict
 
 
-import transforms3d.quaternions as tq
 
 
 autocast = torch.amp.autocast("cuda", enabled=True)

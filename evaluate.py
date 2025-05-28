@@ -46,7 +46,11 @@ from ramp.utils import (
 )
 from ramp.config import cfg as VO_cfg
 from ramp.Ramp_vo import Ramp_vo
+
 from new_xrvio import XRVIO
+from new_xrvio_o_3 import XRVIO as old_XRVIO
+from newer_xrvio import XRVIO as new_XRVIO
+from shell_xrvio import XRVIOShell
 
 from config import (
     QUEUE_BUFFER_SIZE,
@@ -143,16 +147,15 @@ def async_data_loader_all_events(
     pose_data = np.loadtxt(osp.join(full_scene, "stamped_groundtruth" + suffix + ".txt"), dtype=np.float64)
     assert vel_data.shape[0] == pose_data.shape[0]
 
-    print(imu_data)
-    print(imu_data.shape)
 
-    imu_t        = imu_data[:, 1] #seconds
+    imu_t_s = imu_data[:, 1] #seconds
+    imu_t_ns = imu_t_s * 1e9 # Convert to NANOSECONDS
     imu_gyro     = imu_data[:, 2:5]
     imu_accel    = imu_data[:, 5:8]
-    def imu_slice(start_t, end_t):
-        _i0 = np.searchsorted(imu_t, start_t, side="left")
-        _i1 = np.searchsorted(imu_t, end_t,   side="right")
-        return imu_t[_i0:_i1], imu_gyro[_i0:_i1], imu_accel[_i0:_i1]
+    def imu_slice(start_t_ns, end_t_ns):
+        _i0 = np.searchsorted(imu_t_ns, start_t_ns, side="left")
+        _i1 = np.searchsorted(imu_t_ns, end_t_ns,   side="right")
+        return imu_t_ns[_i0:_i1], imu_gyro[_i0:_i1], imu_accel[_i0:_i1]
     
  
     # ---------------------------------------------
@@ -194,6 +197,12 @@ def async_data_loader_all_events(
 
     loading_bar = atqdm(range(n_events_voxels))
     loading_bar.set_description("Async Importing Images+Events")
+
+    print(f"First IMU timestamps: {imu_t_ns[:5]}")
+    # Assuming event.t is loaded
+    print(f"First event timestamps (raw): {event.t[:5]}") 
+    print(f"First image timestamps from timestamps.txt: {timestamps[:5]}")
+    print(f"First pose timestamps: {pose_t[:5]}")
  
     i1 = 0
     for i in loading_bar:
@@ -218,7 +227,7 @@ def async_data_loader_all_events(
 
         if IMU_TESTING:
             ts_start_ns, ts_end_ns = event.t[i0], event.t[i1 - 1] # first and last event in voxel
-            ts_start, ts_end = ts_start_ns/1e9, ts_end_ns/1e9
+            ts_start, ts_end = ts_start_ns, ts_end_ns
 
             # pose = pose_last(ts_start,ts_end)
             # pose = torch.from_numpy(pose).float()
@@ -323,7 +332,12 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     img_timestamps = []
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
     if IMU_TESTING:
-        slam = XRVIO(0.0033333333333333) #dt hardcoded for now
+        sampling_period_s = 0.0033333333333333
+        actual_imu_sampling_period_ns = sampling_period_s * 1e9
+        slam = XRVIO(sampling_period_s) #dt hardcoded for now
+        # slam = old_XRVIO(actual_imu_sampling_period_s) #dt hardcoded for now
+        # slam = XRVIOShell(actual_imu_sampling_period_s) #dt hardcoded for now
+        # slam = new_XRVIO(actual_imu_sampling_period_s)
     else:
         slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
 
@@ -346,7 +360,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
             if mask:
                 img_timestamps.append(f_i)
             
-            if t == 60:
+            if t == 1162:
                 print("TESTING EARLY")
                 break
     else:
@@ -384,7 +398,17 @@ def async_evaluate_sequence(
 
 
 
-    n = len(traj_est)  #cuttoff for testing        
+    n = len(traj_est)  #cuttoff for testing  
+
+
+
+    print("\nLEN OF EST: ", n,"\n\n")      
+
+    print(img_timestamps_all[frame_indecies[-1]], _tstamps[-1],traj_ref.timestamps[n],"\n\n")
+
+    n = np.array(traj_ref.timestamps).searchsorted(_tstamps[-1],side="left")
+    print("new N", n)
+
 
     traj_ref = PoseTrajectory3D( 
         positions_xyz            = traj_ref.positions_xyz[:n],
@@ -395,7 +419,8 @@ def async_evaluate_sequence(
     traj_est_ = PoseTrajectory3D(
         positions_xyz=traj_est[:, :3],
         orientations_quat_wxyz=traj_est[:, 3:][:, (1, 2, 3, 0)],
-        timestamps=img_timestamps_all[frame_indecies],
+        #timestamps=img_timestamps_all[frame_indecies],
+        timestamps= _tstamps
     )
 
     # save_output_for_COLMAP("colmap_saving", traj_est_, points, colors, fx, fy, cx, cy)
@@ -463,24 +488,6 @@ def async_evaluate_sequence(
     plt.savefig("traj_compare_mat.png", dpi=300)
     plt.close()
 
-    # fig, ax = plt.subplots(figsize=(6,6))
-    # plot.traj(ax, traj_ref, style="--", label="reference")
-    # plot.traj(ax, traj_est, style="-",  label="estimate")
-    # ax.scatter(traj_ref.positions_xyz[0,0], traj_ref.positions_xyz[0,1],
-    #         marker="o", s=50, label="start (ref)")
-    # ax.scatter(traj_ref.positions_xyz[-1,0], traj_ref.positions_xyz[-1,1],
-    #         marker="x", s=50, label="end (ref)")
-
-    # ax.set_xlabel("x [m]")
-    # ax.set_ylabel("y [m]")
-    # ax.axis("equal")
-    # ax.legend()
-    # ax.set_title("Aligned Trajectories (XY projection)")
-
-    # plt.tight_layout()
-    # plt.savefig("traj_compare.png", dpi=300)
-    # plt.close()
-
 
     print(result)
     T = result.np_arrays["alignment_transformation_sim3"]
@@ -540,6 +547,7 @@ def evaluate(
             traj_ref = read_tartan_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
+            
         elif "StereoDavis" in dataset_name:
             img_timestamps = img_timestamps / 1e6
             traj_ref = read_stereodavis_format_poses(
