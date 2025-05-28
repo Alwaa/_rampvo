@@ -10,8 +10,8 @@ import g2o
 from g2o import (
     CameraParameters,
     SparseOptimizer,
-    LinearSolverDenseSE3, 
-    LinearSolverCholmodSE3,
+    # LinearSolverDenseSE3, 
+    # LinearSolverCholmodSE3,
     BlockSolverSE3,
     OptimizationAlgorithmLevenberg,
     SE3Quat,
