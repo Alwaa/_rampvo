@@ -72,12 +72,19 @@ class DeadReckoning:
 
         # Rodrigues' formula
         return c * np.identity(3) + (1 - c) * np.outer(axis, axis) + s * self._hat(axis)
+    
+    def direct_imu_data(self, timestamps, angular_velocities, accelerations):
+        self.imu_data = {
+            "ts": timestamps[:, 0],        # Timestamps
+            "gyros": angular_velocities[:, 1:4],   # Angular velocities (wx, wy, wz)
+            "accels": accelerations[:, 4:7]   # Linear accelerations (ax, ay, az)
+        }
 
     def load_imu_data(self, filepath):
         """
         Loads IMU data from a text file.
-        Expected format: idx t wx wy wz ax ay az (space separated)
-        Lines starting with '#' are skipped.
+        Expected format: idx t wx wy wz ax ay az
+        Lines starting with '#' skipped.
 
         Args:
             filepath (str): The path to the IMU data file.

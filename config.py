@@ -10,7 +10,7 @@ QUEUE_BUFFER_SIZE = 2400
 # When to start the evaluation NB! Queue should load faster than is used on avg!
 QUEUE_ASYNC_MIN_SIZE = 120 #1200 
 #Currently test with pose
-IMU_TESTING = True
+IMU_TESTING = False
 #################################
 
 
