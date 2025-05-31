@@ -16,6 +16,7 @@ IMU_TESTING = False
 
 ### Location Specific & Overrides ###
 if RAMPVO_ENV == "server":
+    print("RAMPVO_ENV=server\n")
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     assert cuda_visible is not None and len(cuda_visible), "!On the server you need to set enviroment variable!:\n CUDA_VISIBLE_DEVICES\n"
 

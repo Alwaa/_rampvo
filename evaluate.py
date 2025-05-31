@@ -48,9 +48,6 @@ from ramp.config import cfg as VO_cfg
 from ramp.Ramp_vo import Ramp_vo
 
 from new_xrvio import XRVIO
-from new_xrvio_o_3 import XRVIO as old_XRVIO
-from newer_xrvio import XRVIO as new_XRVIO
-from shell_xrvio import XRVIOShell
 
 from config import (
     QUEUE_BUFFER_SIZE,
@@ -335,9 +332,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         sampling_period_s = 0.0033333333333333
         actual_imu_sampling_period_ns = sampling_period_s * 1e9
         slam = XRVIO(sampling_period_s) #dt hardcoded for now
-        # slam = old_XRVIO(actual_imu_sampling_period_s) #dt hardcoded for now
-        # slam = XRVIOShell(actual_imu_sampling_period_s) #dt hardcoded for now
-        # slam = new_XRVIO(actual_imu_sampling_period_s)
+        
     else:
         slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
 
@@ -396,19 +391,15 @@ def async_evaluate_sequence(
         
         traj_est, _tstamps, frame_indecies = res
 
-
-
     n = len(traj_est)  #cuttoff for testing  
-
-
+    timestamps = _tstamps if IMU_TESTING else img_timestamps_all[frame_indecies]
+    time_traj = timestamps[-1]
 
     print("\nLEN OF EST: ", n,"\n\n")      
+    print(img_timestamps_all[frame_indecies[-1]], time_traj,traj_ref.timestamps[n],"\n\n")
 
-    print(img_timestamps_all[frame_indecies[-1]], _tstamps[-1],traj_ref.timestamps[n],"\n\n")
-
-    n = np.array(traj_ref.timestamps).searchsorted(_tstamps[-1],side="left")
+    n = np.array(traj_ref.timestamps).searchsorted(time_traj,side="left")
     print("new N", n)
-
 
     traj_ref = PoseTrajectory3D( 
         positions_xyz            = traj_ref.positions_xyz[:n],
@@ -416,17 +407,16 @@ def async_evaluate_sequence(
         timestamps               = traj_ref.timestamps[:n]
     )
 
-    traj_est_ = PoseTrajectory3D(
+    raw_traj_est_ = PoseTrajectory3D(
         positions_xyz=traj_est[:, :3],
         orientations_quat_wxyz=traj_est[:, 3:][:, (1, 2, 3, 0)],
-        #timestamps=img_timestamps_all[frame_indecies],
-        timestamps= _tstamps
+        timestamps= timestamps
     )
 
     # save_output_for_COLMAP("colmap_saving", traj_est_, points, colors, fx, fy, cx, cy)
 
     try:
-        traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est_)
+        traj_ref, traj_est = sync.associate_trajectories(traj_ref, raw_traj_est_)
 
         result = main_ape.ape(
             traj_ref=traj_ref,
@@ -463,6 +453,7 @@ def async_evaluate_sequence(
             print("→ dumped aligned_trajs.npz")
     except Exception as e:
         print("Failed to save trajectories with exception: ", e)
+
     
     # --- Quick matplotlib plot -----
     # get N×3 arrays of [x,y,z]
@@ -470,9 +461,7 @@ def async_evaluate_sequence(
     est_xyz = traj_est.positions_xyz
 
     plt.figure(figsize=(6,6))
-    # reference as dashed
     plt.plot(ref_xyz[:,0], ref_xyz[:,1], '--', label='reference')
-    # estimate as solid
     plt.plot(est_xyz[:,0], est_xyz[:,1], '-',  label='estimate')
 
     # mark start/end
@@ -485,7 +474,7 @@ def async_evaluate_sequence(
     plt.title('Trajectory Comparison (XY)')
     plt.legend()
     plt.tight_layout()
-    plt.savefig("traj_compare_mat.png", dpi=300)
+    plt.savefig("figs/traj_compare_mat.png", dpi=300)
     plt.close()
 
 
@@ -496,7 +485,7 @@ def async_evaluate_sequence(
     print("scale =", scale)
     print("==================")
 
-    return ate_score, rot_score, traj_est, traj_ref
+    return ate_score, rot_score, traj_est, traj_ref, raw_traj_est_
 
 @torch.no_grad()
 def evaluate(
@@ -547,22 +536,13 @@ def evaluate(
             traj_ref = read_tartan_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
-            
-        elif "StereoDavis" in dataset_name:
-            img_timestamps = img_timestamps / 1e6
-            traj_ref = read_stereodavis_format_poses(
-                traj_path=osp.join(scene_location, "poses.txt"),
-                timestamps_path=osp.join(scene_location, "timestamps_poses.txt"),
-            )
-        elif "EDS" in dataset_name:
-            img_timestamps = img_timestamps / 1e6
-            traj_ref = read_eds_format_poses(traj_ref_path)
         elif "MoonLanding" in dataset_name:
             traj_ref = read_moonlanding_format_poses(
                 traj_path=traj_ref_path, timestamps_path=timestamps_path
             )
         else:
             raise NotImplementedError("dataset not supported")
+        
         
         #TODO: Fix for multiple trails
         async_q = Queue(maxsize=QUEUE_BUFFER_SIZE)
@@ -589,19 +569,25 @@ def evaluate(
             enable_timing = enable_timing,
             save_slam_steps_path =  save_encoder_path,
         )
-        save_res = partial(save_results, scene=scene_name, eval_type="full_data")
+        
+
 
         results[scene] = {}
         for j in range(trials):
             res = eval_subtraj()
+
             if res is None:
                 print(f"SKIPPING: {scene_name}")
                 skipped_scenes.append(scene_name)
                 continue
-            ate_error, rot_error, traj_est, traj_ref = res
-            print("\n full_data ate ------->", ate_error)
-            print("\n full_data rot ------->", rot_error)
-            save_res(traj_est=traj_est, traj_ref=traj_ref, j=j)
+
+            ate_error, rot_error, traj_est, traj_ref, raw_traj_est = res
+            
+            print("\n full_data ate ------->", ate_error, "\nfull_data rot ------->", rot_error)
+
+            save_results(traj_est=traj_est, traj_ref=traj_ref,scene=scene_name, j=j, eval_type="aligned")
+            save_results(traj_est=raw_traj_est, traj_ref=traj_ref,scene=scene_name, j=j, eval_type="unaligned")
+
             results[scene][f"trial_{j}"] = {
                 "ate": ate_error,
                 "rot_err": list(rot_error),
