@@ -3,6 +3,7 @@ import numpy as np
 import os
 from pathlib import Path
 import glob
+from scipy.spatial.transform import Rotation as R # For converting rotation matrix to quaternion
 
 # --- Configuration: EDIT THESE VALUES ---
 DATASET_DIR = "/run/media/alexander/T5 EVO/datasets" 
@@ -14,8 +15,10 @@ TRACK_REFRESH_INTERVAL = 50 # Example: clear tracks every 50 frames
 # fx 0 cx
 # 0 fy cy
 # 0 0 1
-INTRINSICS = (320,320,320,240) # format: fx fy cx cy
+INTRINSICS = (320.0, 320.0, 320.0, 240.0) # format: fx fy cx cy (Made them float for consistency)
 
+# timestamp tx ty tz qx qy qz qw # Set to None to disable pose file output.
+OUTPUT_POSE_FILE_NAME = f"stamped_traj_estimate.txt" 
 # --- End of Configuration ---
 
 
@@ -24,27 +27,27 @@ FEATURE_PARAMS = dict(maxCorners=300, qualityLevel=0.01, minDistance=7, blockSiz
 LK_PARAMS = dict(winSize=(21, 21), maxLevel=3, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
 
 # --- Global Variables for VO ---
-camera_matrix_K = None
-dist_coeffs = None # Assuming undistorted images for now
+# These are set in __main__ after calling load_camera_intrinsics
+# camera_matrix_K = None 
+# dist_coeffs = None 
 
 # --- Helper Functions ---
 
 def load_camera_intrinsics():
     """
+    Loads camera intrinsic parameters using the global INTRINSICS tuple.
     fx 0 cx
     0 fy cy
     0 0 1
     """
-
-    K = np.eye(3)
-    dist = np.zeros(5) # Default to no distortion
-    K[0,0], K[1,1] = 320, 320
-    K[0,2], K[1,2] = 320, 240
-
-    # K = ⎡ 320.0   0.0   320.0 ⎤  
-    # ⎢  0.0  320.0  240.0 ⎥  
-    # ⎢  0.0    0.0    1.0 ⎥ 
+    fx, fy, cx, cy = INTRINSICS
+    K = np.array([[fx, 0,  cx],
+                  [0,  fy, cy],
+                  [0,  0,  1]], dtype=np.float32)
+    dist = np.zeros(5, dtype=np.float32) # Default to no distortion
     
+    print(f"Using hardcoded intrinsics (fx, fy, cx, cy): {fx}, {fy}, {cx}, {cy}")
+    print(f"K matrix:\n{K}")
     return K, dist
 
 
@@ -88,17 +91,10 @@ def draw_trajectory(trajectory_points_list, traj_img_width, traj_img_height, sca
     if not trajectory_points_list:
         return traj_img
 
-    # Convert points to screen coordinates (X -> screen_x, Z -> screen_y)
-    # Assuming input trajectory points are [x, y, z] and we plot (x, z)
-    # Positive Z is forward, positive X is right.
-    # For display, positive Z (forward) often goes upwards or downwards. Let's make it go downwards.
     screen_points = []
     for pt3d in trajectory_points_list:
-        # Use pt3d[0] for X, pt3d[2] for Z
         screen_x = int(center_x + pt3d[0] * scale)
-        screen_y = int(center_y + pt3d[2] * scale) # If Z is depth, and positive Z is away from camera.
-                                                 # Or use -pt3d[2] if Z is forward and you want forward to be up.
-                                                 # Let's assume Z is depth (away), so positive Z maps to positive Y on screen (down).
+        screen_y = int(center_y + pt3d[2] * scale) 
         screen_points.append((screen_x, screen_y))
 
     for i in range(len(screen_points) - 1):
@@ -114,7 +110,8 @@ def draw_trajectory(trajectory_points_list, traj_img_width, traj_img_height, sca
 # --- Main Visual Odometry Logic ---
 
 def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera, 
-                        max_frames=None, track_refresh_interval=None, K_matrix=None, dist_coeffs_val=None):
+                        max_frames=None, track_refresh_interval=None, K_matrix=None, dist_coeffs_val=None,
+                        output_pose_file=None): # Added output_pose_file argument
     if K_matrix is None:
         print("Error: Camera intrinsic matrix K is not available. Cannot proceed with VO.")
         return
@@ -126,23 +123,34 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
         image_paths = image_paths[:max_frames]
         print(f"Processing a maximum of {len(image_paths)} frames.")
 
-    # VO State
-    R_global_pose = np.eye(3) # Camera orientation in world frame (Identity initially)
-    t_global_pos = np.zeros((3, 1)) # Camera position in world frame (Origin initially)
-    trajectory_3d_points = [t_global_pos.flatten().copy()] # Store 3D positions [x,y,z]
+    R_global_pose = np.eye(3) 
+    t_global_pos = np.zeros((3, 1)) 
+    trajectory_3d_points = [t_global_pos.flatten().copy()] 
     
-    # For feature tracking
     vo_prev_gray = None
-    vo_p0_prev_features = None # Features from the previous VO frame
+    vo_p0_prev_features = None 
 
     track_visualization_mask = None
-    traj_img_width, traj_img_height = 400, 600 # Dimensions for trajectory plot window
+    traj_img_width, traj_img_height = 400, 600 
     cv2.namedWindow('Feature Tracks - VO', cv2.WINDOW_NORMAL)
     cv2.namedWindow('Trajectory', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('Trajectory', traj_img_width, traj_img_height)
 
     frame_count_since_last_refresh = 0
     first_frame = True
+    
+    pose_file_writer = None
+    if output_pose_file:
+        try:
+            pose_file_writer = open(output_pose_file, 'w')
+            pose_file_writer.write("# timestamp tx ty tz qx qy qz qw\n")
+            initial_quat = R.from_matrix(R_global_pose).as_quat() 
+            pose_file_writer.write(f"0.000000 {t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
+                                   f"{initial_quat[0]:.6f} {initial_quat[1]:.6f} {initial_quat[2]:.6f} {initial_quat[3]:.6f}\n")
+            print(f"Opened pose output file: {output_pose_file}")
+        except IOError as e:
+            print(f"Error opening pose output file '{output_pose_file}': {e}")
+            pose_file_writer = None
 
     for frame_idx in range(len(image_paths)):
         current_frame_bgr = cv2.imread(image_paths[frame_idx])
@@ -150,41 +158,33 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
             print(f"Warning: Could not read image {image_paths[frame_idx]}. Skipping.")
             continue
         
-        if track_visualization_mask is None: # Initialize once we have frame dimensions
+        if track_visualization_mask is None: 
             track_visualization_mask = np.zeros_like(current_frame_bgr)
 
         current_frame_gray = cv2.cvtColor(current_frame_bgr, cv2.COLOR_BGR2GRAY)
-        
-        # Undistort (if distortion coeffs are provided)
-        # For now, assuming undistorted or dist_coeffs_val is None/zeros
-        # if dist_coeffs_val is not None and np.any(dist_coeffs_val):
-        # current_frame_gray_undistorted = cv2.undistort(current_frame_gray, K_matrix, dist_coeffs_val)
-        # else:
-        current_frame_gray_undistorted = current_frame_gray # Use as is
+        current_frame_gray_undistorted = current_frame_gray # Assuming undistorted
 
-        # --- Feature Tracking ---
         if first_frame:
             vo_p0_prev_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
-            if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10: # Need enough features
-                print(f"Frame {frame_idx}: Not enough initial features found. Skipping frame.")
-                cv2.imshow('Feature Tracks - VO', current_frame_bgr) # Show frame even if no features
+            if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10: 
+                print(f"Frame {frame_idx}: Not enough initial features. Skipping.")
+                cv2.imshow('Feature Tracks - VO', current_frame_bgr) 
                 key = cv2.waitKey(30) & 0xff
                 if key == 27: break
                 continue
             vo_prev_gray = current_frame_gray_undistorted.copy()
             first_frame = False
-            # Display current frame with initial points
             vis_img = current_frame_bgr.copy()
             for pt in vo_p0_prev_features:
                 cv2.circle(vis_img, tuple(pt.ravel().astype(int)), 3, (0,0,255), -1)
             cv2.imshow('Feature Tracks - VO', vis_img)
         else:
             if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10:
-                print(f"Frame {frame_idx}: Too few features from previous step. Re-detecting.")
+                print(f"Frame {frame_idx}: Too few features. Re-detecting.")
                 vo_p0_prev_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
                 if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10:
-                    print(f"Frame {frame_idx}: Re-detection failed. Skipping VO for this frame.")
-                    vo_prev_gray = current_frame_gray_undistorted.copy() # Update prev_gray anyway
+                    print(f"Frame {frame_idx}: Re-detection failed. Skipping VO.")
+                    vo_prev_gray = current_frame_gray_undistorted.copy() 
                     cv2.imshow('Feature Tracks - VO', current_frame_bgr)
                     key = cv2.waitKey(30) & 0xff
                     if key == 27: break
@@ -198,89 +198,95 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
                 good_new_points = p1_current_features[st == 1]
                 good_old_points = vo_p0_prev_features[st == 1]
 
-            # Periodically refresh the track visualization mask
             if track_refresh_interval and track_refresh_interval > 0:
                 if frame_count_since_last_refresh >= track_refresh_interval:
                     track_visualization_mask = np.zeros_like(current_frame_bgr)
                     frame_count_since_last_refresh = 0
                 else: frame_count_since_last_refresh += 1
             
-            vis_img = current_frame_bgr.copy() # Default display if no good points
-            if good_new_points is not None and len(good_new_points) > 5: # Need at least 5 points for Essential Matrix
-                # --- Visual Odometry Estimation ---
+            vis_img = current_frame_bgr.copy() 
+            pose_updated_this_frame = False
+            if good_new_points is not None and len(good_new_points) > 5: 
                 E, mask_e = cv2.findEssentialMat(good_new_points, good_old_points, K_matrix, 
                                                  method=cv2.RANSAC, prob=0.999, threshold=1.0)
                 
-                if E is not None and np.sum(mask_e) >= 5 : # Check if E is found and enough inliers
-                    # Decompose Essential Matrix and recover pose
-                    # R_21: Rotation from cam2 to cam1, t_21: Translation of cam2 origin in cam1 coords
+                if E is not None and np.sum(mask_e) >= 5 : 
                     retval, R_21, t_21, mask_rp = cv2.recoverPose(E, good_new_points, good_old_points, K_matrix, mask=mask_e)
 
                     if retval > 0 and R_21 is not None and t_21 is not None and np.sum(mask_rp) >=5:
-                        # Relative pose (transform from cam1 to cam2)
                         R_relative_pose = R_21.T 
                         t_relative_pose = -R_21.T @ t_21
-
-                        # Update global pose
-                        # t_global_pos is the position of the camera in the world
-                        # R_global_pose is the orientation of the camera in the world
                         t_global_pos = t_global_pos + R_global_pose @ t_relative_pose
                         R_global_pose = R_global_pose @ R_relative_pose
-                        
                         trajectory_3d_points.append(t_global_pos.flatten().copy())
+                        pose_updated_this_frame = True
                     else:
                         print(f"Frame {frame_idx}: recoverPose failed or not enough inliers ({np.sum(mask_rp) if mask_rp is not None else 0}).")
                 else:
                     print(f"Frame {frame_idx}: findEssentialMat failed or not enough inliers ({np.sum(mask_e) if mask_e is not None else 0}).")
-
-                # Drawing tracks (use original good_old/new before RANSAC filtering for visualization continuity)
+                
                 vis_img, track_visualization_mask = draw_tracks(current_frame_bgr, good_old_points, good_new_points, track_visualization_mask)
             
             cv2.imshow('Feature Tracks - VO', vis_img)
             
-            # Update for next iteration (tracking)
+            if pose_updated_this_frame and pose_file_writer:
+                timestamp = frame_idx * 0.1 
+                current_quat = R.from_matrix(R_global_pose).as_quat()
+                pose_file_writer.write(f"{timestamp:.6f} "
+                                       f"{t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
+                                       f"{current_quat[0]:.6f} {current_quat[1]:.6f} {current_quat[2]:.6f} {current_quat[3]:.6f}\n")
+
             vo_prev_gray = current_frame_gray_undistorted.copy()
-            if good_new_points is not None and len(good_new_points) > FEATURE_PARAMS['maxCorners'] * 0.25: # If enough points remain
+            if good_new_points is not None and len(good_new_points) > FEATURE_PARAMS['maxCorners'] * 0.25: 
                  vo_p0_prev_features = good_new_points.reshape(-1, 1, 2)
-            else: # Re-detect if too few points or tracking failed
-                print(f"Frame {frame_idx}: Feature count low or tracking failed. Re-detecting for next frame.")
+            else: 
+                print(f"Frame {frame_idx}: Feature count low or tracking failed. Re-detecting.")
                 vo_p0_prev_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
                 if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10:
-                    print(f"Frame {frame_idx}: Critical re-detection failure. May affect VO.")
-                    first_frame = True # Reset to re-initialize detector on next available frame
-                    track_visualization_mask = np.zeros_like(current_frame_bgr) # Also reset tracks
-                # else vo_p0_prev_features is now set for next iteration
+                    print(f"Frame {frame_idx}: Critical re-detection failure.")
+                    first_frame = True 
+                    if track_visualization_mask is not None: 
+                        track_visualization_mask = np.zeros_like(track_visualization_mask)
 
-        # Draw trajectory
-        # Determine dynamic scale for trajectory plotting
         current_max_range = 0
         if len(trajectory_3d_points) > 1:
             coords = np.array(trajectory_3d_points)
             max_x = np.max(np.abs(coords[:, 0]))
             max_z = np.max(np.abs(coords[:, 2]))
-            current_max_range = max(max_x, max_z, 1e-5) # Avoid division by zero
+            current_max_range = max(max_x, max_z, 1e-5) 
         
-        # Heuristic for scaling: try to fit max_range into about half the trajectory image dimension
         dynamic_scale = (min(traj_img_width, traj_img_height) / 2.5) / current_max_range if current_max_range > 0 else 10.0
-        dynamic_scale = max(1.0, min(dynamic_scale, 200.0)) # Clamp scale
+        dynamic_scale = max(1.0, min(dynamic_scale, 200.0)) 
 
         traj_display_img = draw_trajectory(trajectory_3d_points, traj_img_width, traj_img_height, scale=dynamic_scale)
         cv2.imshow('Trajectory', traj_display_img)
         
         key = cv2.waitKey(30) & 0xff
-        if key == 27:  # ESC
+        if key == 27:  
             print("ESC pressed, stopping.")
             break
-        if key == ord('r'): # Reset VO
+        if key == ord('r'): 
             print("User requested VO reset ('r' key).")
             R_global_pose = np.eye(3)
             t_global_pos = np.zeros((3, 1))
             trajectory_3d_points = [t_global_pos.flatten().copy()]
-            first_frame = True # Re-initialize feature detection and VO
+            first_frame = True 
             vo_p0_prev_features = None
-            track_visualization_mask = np.zeros_like(current_frame_bgr)
+            if track_visualization_mask is not None:
+                 track_visualization_mask = np.zeros_like(track_visualization_mask)
             frame_count_since_last_refresh = 0
             print("VO reset.")
+            if pose_file_writer: # Write reset pose to file
+                # Use a slightly incremented timestamp for the reset event
+                reset_timestamp = (frame_idx + 0.05) * 0.1 # Ensure it's distinct if reset happens on same frame_idx
+                initial_quat = R.from_matrix(R_global_pose).as_quat()
+                pose_file_writer.write(f"{reset_timestamp:.6f} {t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
+                                   f"{initial_quat[0]:.6f} {initial_quat[1]:.6f} {initial_quat[2]:.6f} {initial_quat[3]:.6f}\n")
+
+
+    if pose_file_writer:
+        pose_file_writer.close()
+        print(f"Pose data saved to {output_pose_file}")
     
     cv2.destroyAllWindows()
     print("Visual Odometry finished.")
@@ -289,13 +295,12 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    camera_matrix_K, dist_coeffs = load_camera_intrinsics()
+    camera_matrix_K_main, dist_coeffs_main = load_camera_intrinsics() # Use your function
 
-    if camera_matrix_K is None:
+    if camera_matrix_K_main is None:
         print("Could not load camera intrinsics. Exiting.")
         exit(1)
     
-    # Validate dataset directory
     if not Path(DATASET_DIR).exists() or not Path(DATASET_DIR).is_dir():
         print(f"Error: DATASET_DIR ('{DATASET_DIR}') not found or is not a directory.")
         exit(1)
@@ -304,9 +309,15 @@ if __name__ == '__main__':
         print(f"Error: SEQUENCE_NAME is not configured.")
         exit(1)
 
+    output_file_path_main = None
+    if OUTPUT_POSE_FILE_NAME:
+        output_file_path_main = Path(OUTPUT_POSE_FILE_NAME)
+
     print(f"Starting Visual Odometry for sequence: {SEQUENCE_NAME} in {DATASET_DIR}")
     print(f"Camera: {CAMERA_VIEW}, Max Frames: {MAX_FRAMES_TO_PROCESS if MAX_FRAMES_TO_PROCESS is not None else 'All'}")
     print(f"Track Refresh Interval: {TRACK_REFRESH_INTERVAL if TRACK_REFRESH_INTERVAL and TRACK_REFRESH_INTERVAL > 0 else 'Disabled'}")
+    if output_file_path_main:
+        print(f"Outputting poses to: {output_file_path_main.resolve()}")
     
     run_visual_odometry(
         DATASET_DIR, 
@@ -314,6 +325,7 @@ if __name__ == '__main__':
         CAMERA_VIEW, 
         MAX_FRAMES_TO_PROCESS,
         TRACK_REFRESH_INTERVAL,
-        camera_matrix_K, # Pass loaded intrinsics
-        dist_coeffs      # Pass loaded distortion coefficients
+        camera_matrix_K_main, 
+        dist_coeffs_main,
+        str(output_file_path_main) if output_file_path_main else None
     )
