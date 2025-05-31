@@ -7,26 +7,31 @@ from scipy.spatial.transform import Rotation as R
 
 # --- Configuration: EDIT THESE VALUES ---
 DATASET_DIR = "/run/media/alexander/T5 EVO/datasets" 
-SEQUENCE_NAME = "ocean"
 CAMERA_VIEW = "left"
 MAX_FRAMES_TO_PROCESS = None 
 TRACK_REFRESH_INTERVAL = 50 
 INTRINSICS = (320.0, 320.0, 320.0, 240.0) 
-OUTPUT_POSE_FILE_NAME = f"{SEQUENCE_NAME}_estimated_pose_fb.txt"
+OUTPUT_POSE_FILE_NAME = f"stamped_traj_estimate.txt" # Changed suffix
+Y_FACTOR = 1
 
-# NEW: Threshold for forward-backward optical flow error (in pixels)
-FB_ERROR_THRESHOLD = 1.5 # Tune this value; lower is stricter
+# Threshold for forward-backward optical flow error (in pixels)
+FB_ERROR_THRESHOLD = 1.0 # User's value
 # --- End of Configuration ---
 
 
-# --- Parameters for feature detection and tracking ---
-FEATURE_PARAMS = dict(maxCorners=300, qualityLevel=0.01, minDistance=7, blockSize=7)
+# --- Parameters for feature detection and tracking (More Aggressive) ---
+FEATURE_PARAMS = dict(
+    maxCorners=500,      # Increased: Detect more features
+    qualityLevel=0.005,  # Decreased: Accept features of slightly lower quality
+    minDistance=5,       # Decreased: Allow features to be closer
+    blockSize=7
+)
 LK_PARAMS = dict(winSize=(21, 21), maxLevel=3, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
 
-
-IMAGE_FOLDER_TO_USE = Path(DATASET_DIR) / "ocean" / "Easy" / "P000" / f"image_{CAMERA_VIEW}"
-IMAGE_FOLDER_TO_USE = Path(DATASET_DIR) / "abandonedfactory" / "Easy" / "P002" / f"image_{CAMERA_VIEW}"
-
+# A selection
+# IMAGE_FOLDER_TO_USE = Path(DATASET_DIR) / "ocean" / "Easy" / "P000" / f"image_{CAMERA_VIEW}"
+# IMAGE_FOLDER_TO_USE = Path(DATASET_DIR) / "abandonedfactory" / "Easy" / "P002" / f"image_{CAMERA_VIEW}"
+IMAGE_FOLDER_TO_USE = Path(DATASET_DIR) / "seasonsforest" / "Easy" / "P001" / f"image_{CAMERA_VIEW}"
 
 # --- Helper Functions ---
 
@@ -37,8 +42,10 @@ def load_camera_intrinsics():
     print(f"Using hardcoded intrinsics (fx, fy, cx, cy): {fx}, {fy}, {cx}, {cy}")
     return K, dist
 
-def load_tartanair_image_paths():
-
+def load_tartanair_image_paths(): # Uses global IMAGE_FOLDER_TO_USE
+    if not IMAGE_FOLDER_TO_USE.exists() or not IMAGE_FOLDER_TO_USE.is_dir():
+        print(f"Error: IMAGE_FOLDER_TO_USE does not exist or is not a directory: {IMAGE_FOLDER_TO_USE}")
+        return []
     print(f"Loading images from: {IMAGE_FOLDER_TO_USE}")
     image_files = sorted(glob.glob(str(IMAGE_FOLDER_TO_USE / "*.png")))
     if not image_files: print(f"Warning: No PNG images found in {IMAGE_FOLDER_TO_USE}")
@@ -69,14 +76,14 @@ def draw_trajectory(trajectory_points_list, traj_img_width, traj_img_height, sca
 
 # --- Main Visual Odometry Logic ---
 
-def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera, 
-                        max_frames=None, track_refresh_interval=None, K_matrix=None, dist_coeffs_val=None,
-                        output_pose_file=None, fb_error_thresh=1.0): # Added fb_error_thresh
+def run_visual_odometry(K_matrix=None, dist_coeffs_val=None, # Removed dataset_root_dir etc. as IMAGE_FOLDER_TO_USE is global
+                        max_frames=None, track_refresh_interval=None, 
+                        output_pose_file=None, fb_error_thresh=1.0):
     if K_matrix is None:
         print("Error: Camera intrinsic matrix K is not available.")
         return
 
-    image_paths = load_tartanair_image_paths()
+    image_paths = load_tartanair_image_paths() # Now uses global IMAGE_FOLDER_TO_USE
     if not image_paths: return
 
     if max_frames is not None and max_frames > 0 :
@@ -101,7 +108,7 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
             pose_file_writer = open(output_pose_file, 'w')
             pose_file_writer.write("# timestamp tx ty tz qx qy qz qw\n")
             initial_quat = R.from_matrix(R_global_pose).as_quat() 
-            pose_file_writer.write(f"0.000000 {t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
+            pose_file_writer.write(f"0.000000 {t_global_pos[0,0]:.6f} {Y_FACTOR*t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
                                    f"{initial_quat[0]:.6f} {initial_quat[1]:.6f} {initial_quat[2]:.6f} {initial_quat[3]:.6f}\n")
             print(f"Opened pose output file: {output_pose_file}")
         except IOError as e:
@@ -116,7 +123,7 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
         current_frame_gray = cv2.cvtColor(current_frame_bgr, cv2.COLOR_BGR2GRAY)
         current_frame_gray_undistorted = current_frame_gray 
 
-        good_new_points, good_old_points = None, None # Initialize for this frame
+        good_new_points, good_old_points = None, None 
 
         if first_frame:
             vo_p0_prev_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
@@ -127,115 +134,113 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
                 continue
             vo_prev_gray = current_frame_gray_undistorted.copy()
             first_frame = False
-            vis_img_tracks = current_frame_bgr.copy() # No tracks yet, just points
+            vis_img_tracks = current_frame_bgr.copy() 
             if vo_p0_prev_features is not None:
                 for pt in vo_p0_prev_features: cv2.circle(vis_img_tracks, tuple(pt.ravel().astype(int)), 3, (0,0,255), -1)
-        else: # Not the first frame, try to track
-            if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10:
-                print(f"Frame {frame_idx}: Too few features from prev step. Re-detecting for VO.")
-                vo_p0_prev_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
-                if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10:
-                    print(f"Frame {frame_idx}: Re-detection failed. Skipping VO for this frame.")
-                    vo_prev_gray = current_frame_gray_undistorted.copy() 
-                    cv2.imshow('Feature Tracks - VO', current_frame_bgr)
-                    if (cv2.waitKey(30) & 0xff) == 27: break
-                    continue 
+        else: 
+            tracked_features_current = None
+            tracked_features_prev = None
+            if vo_p0_prev_features is not None and len(vo_p0_prev_features) >= 5: # Need some points to track
+                p1_current_features, st_fwd, _ = cv2.calcOpticalFlowPyrLK(vo_prev_gray, current_frame_gray_undistorted, vo_p0_prev_features, None, **LK_PARAMS)
+                fwd_success_mask = (st_fwd.flatten() == 1)
+                p0_fwd_good = vo_p0_prev_features[fwd_success_mask]
+                p1_fwd_good = p1_current_features[fwd_success_mask]
+
+                if len(p1_fwd_good) > 0:
+                    p0_reprojected, st_bwd, _ = cv2.calcOpticalFlowPyrLK(current_frame_gray_undistorted, vo_prev_gray, p1_fwd_good, None, **LK_PARAMS)
+                    bwd_success_mask = (st_bwd.flatten() == 1)
+                    p0_fwd_bwd_good = p0_fwd_good[bwd_success_mask]
+                    p1_fwd_bwd_good = p1_fwd_good[bwd_success_mask] 
+                    p0_reprojected_final = p0_reprojected[bwd_success_mask]
+
+                    if len(p0_reprojected_final) > 0:
+                        error_fb = np.linalg.norm(p0_fwd_bwd_good.reshape(-1, 2) - p0_reprojected_final.reshape(-1, 2), axis=1)
+                        consistent_mask = error_fb < fb_error_thresh
+                        tracked_features_prev = p0_fwd_bwd_good[consistent_mask]
+                        tracked_features_current = p1_fwd_bwd_good[consistent_mask]
+                        print(f"Frame {frame_idx}: Tracked In {len(vo_p0_prev_features)} -> FwdOK {len(p1_fwd_good)} -> FwdBwdOK {len(tracked_features_current if tracked_features_current is not None else [])}")
+                    else: print(f"Frame {frame_idx}: No points survived backward tracking pass.")
+                else: print(f"Frame {frame_idx}: No points survived forward tracking pass.")
             
-            # --- Forward-Backward Optical Flow Check ---
-            # 1. Forward pass
-            p1_current_features, st_fwd, _ = cv2.calcOpticalFlowPyrLK(vo_prev_gray, current_frame_gray_undistorted, vo_p0_prev_features, None, **LK_PARAMS)
+            good_old_points = tracked_features_prev
+            good_new_points = tracked_features_current
             
-            fwd_success_mask = (st_fwd.flatten() == 1)
-            p0_fwd_good = vo_p0_prev_features[fwd_success_mask]
-            p1_fwd_good = p1_current_features[fwd_success_mask]
-
-            if len(p1_fwd_good) > 0:
-                # 2. Backward pass
-                p0_reprojected, st_bwd, _ = cv2.calcOpticalFlowPyrLK(current_frame_gray_undistorted, vo_prev_gray, p1_fwd_good, None, **LK_PARAMS)
-                
-                bwd_success_mask = (st_bwd.flatten() == 1)
-                
-                # Filter points that were successfully tracked in both directions
-                p0_fwd_bwd_good = p0_fwd_good[bwd_success_mask]
-                p1_fwd_bwd_good = p1_fwd_good[bwd_success_mask] # These are the current points corresponding to p0_fwd_bwd_good
-                p0_reprojected_final = p0_reprojected[bwd_success_mask]
-
-                if len(p0_reprojected_final) > 0:
-                    # 3. Calculate error and filter by threshold
-                    error_fb = np.linalg.norm(p0_fwd_bwd_good.reshape(-1, 2) - p0_reprojected_final.reshape(-1, 2), axis=1)
-                    consistent_mask = error_fb < fb_error_thresh
-                    
-                    good_old_points = p0_fwd_bwd_good[consistent_mask]
-                    good_new_points = p1_fwd_bwd_good[consistent_mask]
-                    
-                    num_fwd = len(vo_p0_prev_features)
-                    num_fwd_tracked = len(p1_fwd_good)
-                    num_fb_passed = len(good_new_points)
-                    print(f"Frame {frame_idx}: Features: In {num_fwd} -> FwdOK {num_fwd_tracked} -> FwdBwdOK {num_fb_passed}")
-                else:
-                    print(f"Frame {frame_idx}: No points survived backward tracking pass.")
-            else:
-                print(f"Frame {frame_idx}: No points survived forward tracking pass.")
-
-            # --- Track Visualization & Refresh ---
             if track_refresh_interval and track_refresh_interval > 0:
                 if frame_count_since_last_refresh >= track_refresh_interval:
                     track_visualization_mask = np.zeros_like(current_frame_bgr)
                     frame_count_since_last_refresh = 0
                 else: frame_count_since_last_refresh += 1
-            
-            # Use 'good_new_points' and 'good_old_points' if available for drawing, else draw raw fwd pass
-            # For clarity, let's always draw based on what VO will use (post FB check)
             vis_img_tracks, track_visualization_mask = draw_tracks(current_frame_bgr, good_old_points, good_new_points, track_visualization_mask)
 
-
-        # --- Visual Odometry Estimation (uses FB-checked points) ---
         pose_updated_this_frame = False
-        if good_new_points is not None and good_old_points is not None and len(good_new_points) > 5: 
+        if good_new_points is not None and good_old_points is not None and len(good_new_points) >= 8: # Min points for E matrix
             E, mask_e = cv2.findEssentialMat(good_new_points, good_old_points, K_matrix, 
-                                             method=cv2.RANSAC, prob=0.999, threshold=1.0) # Threshold for RANSAC inlier
+                                             method=cv2.RANSAC, prob=0.999, threshold=1.0) 
             
             if E is not None and np.sum(mask_e) >= 5 : 
-                retval, R_21, t_21, mask_rp = cv2.recoverPose(E, good_new_points[mask_e.flatten().astype(bool)], 
-                                                              good_old_points[mask_e.flatten().astype(bool)], 
-                                                              K_matrix) # Pass only inliers to recoverPose
+                inlier_new_pts = good_new_points[mask_e.flatten().astype(bool)]
+                inlier_old_pts = good_old_points[mask_e.flatten().astype(bool)]
+                retval, R_21, t_21, mask_rp = cv2.recoverPose(E, inlier_new_pts, inlier_old_pts, K_matrix)
 
-                if retval > 0 and R_21 is not None and t_21 is not None and np.sum(mask_rp if mask_rp is not None else []) >=5 : # mask_rp might be None
+                if retval > 0 and R_21 is not None and t_21 is not None and (mask_rp is None or np.sum(mask_rp) >=5) :
                     R_relative_pose, t_relative_pose = R_21.T, -R_21.T @ t_21
                     t_global_pos = t_global_pos + R_global_pose @ t_relative_pose
                     R_global_pose = R_global_pose @ R_relative_pose
                     trajectory_3d_points.append(t_global_pos.flatten().copy())
                     pose_updated_this_frame = True
-                else:
-                    print(f"Frame {frame_idx}: recoverPose failed or not enough inliers.")
-            else:
-                print(f"Frame {frame_idx}: findEssentialMat failed or not enough inliers.")
+                else: print(f"Frame {frame_idx}: recoverPose failed or not enough inliers.")
+            else: print(f"Frame {frame_idx}: findEssentialMat failed or not enough inliers.")
         
-        if 'vis_img_tracks' not in locals(): vis_img_tracks = current_frame_bgr.copy() # Ensure vis_img_tracks exists
+        if 'vis_img_tracks' not in locals(): vis_img_tracks = current_frame_bgr.copy()
         cv2.imshow('Feature Tracks - VO', vis_img_tracks)
         
-        # --- File Output & Feature Update for Next Iteration ---
         if pose_updated_this_frame and pose_file_writer:
             timestamp = frame_idx * 0.1 
             current_quat = R.from_matrix(R_global_pose).as_quat()
             pose_file_writer.write(f"{timestamp:.6f} "
-                                   f"{t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
+                                   f"{t_global_pos[0,0]:.6f} {-t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
                                    f"{current_quat[0]:.6f} {current_quat[1]:.6f} {current_quat[2]:.6f} {current_quat[3]:.6f}\n")
 
         vo_prev_gray = current_frame_gray_undistorted.copy()
-        # Decide points for next iteration: Use current frame's good new points, or re-detect
-        if good_new_points is not None and len(good_new_points) > FEATURE_PARAMS['maxCorners'] * 0.25: 
-             vo_p0_prev_features = good_new_points.reshape(-1, 1, 2)
-        else: 
-            print(f"Frame {frame_idx}: Feature count low post-VO/FB ({len(good_new_points) if good_new_points is not None else 0}). Re-detecting for next tracking.")
-            vo_p0_prev_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
-            if vo_p0_prev_features is None or len(vo_p0_prev_features) < 10:
-                print(f"Frame {frame_idx}: Critical re-detection failure.")
-                first_frame = True # Reset state to re-initialize on next good frame
-                if track_visualization_mask is not None: track_visualization_mask.fill(0)
+        
+        # --- Aggressive Feature Re-detection and Merging ---
+        # Always detect new features in the current frame
+        newly_detected_features = cv2.goodFeaturesToTrack(current_frame_gray_undistorted, mask=None, **FEATURE_PARAMS)
+        
+        current_valid_tracked_points = good_new_points # Points that were successfully tracked and passed FB
+        
+        if newly_detected_features is None: newly_detected_features = np.array([]) # Ensure it's an array
+        if current_valid_tracked_points is None: current_valid_tracked_points = np.array([]) # Ensure it's an array
 
+        # Ensure both are 3D (N, 1, 2) or empty before vstack
+        if newly_detected_features.ndim == 2: newly_detected_features = newly_detected_features.reshape(-1,1,2)
+        if current_valid_tracked_points.ndim == 2 : current_valid_tracked_points = current_valid_tracked_points.reshape(-1,1,2)
 
-        # --- Trajectory Visualization ---
+        # Combine tracked points with newly detected points
+        if len(current_valid_tracked_points) > 0 and len(newly_detected_features) > 0:
+            combined_features = np.vstack((current_valid_tracked_points, newly_detected_features))
+        elif len(current_valid_tracked_points) > 0:
+            combined_features = current_valid_tracked_points
+        elif len(newly_detected_features) > 0:
+            combined_features = newly_detected_features
+        else:
+            combined_features = np.array([]) # No features at all
+
+        if len(combined_features) > 0:
+            # Remove duplicates (reshape to 2D for unique, then back to 3D)
+            unique_points_2d = np.unique(combined_features.reshape(-1, 2), axis=0)
+            vo_p0_prev_features = unique_points_2d.reshape(-1, 1, 2).astype(np.float32)
+            
+            # Shuffle and cap at maxCorners
+            if len(vo_p0_prev_features) > FEATURE_PARAMS['maxCorners']:
+                np.random.shuffle(vo_p0_prev_features) # Shuffle in place
+                vo_p0_prev_features = vo_p0_prev_features[:FEATURE_PARAMS['maxCorners']]
+            print(f"Frame {frame_idx}: Features for next iter: {len(vo_p0_prev_features)} (after merge & cap)")
+        else:
+            vo_p0_prev_features = None # No features to carry to next iteration
+            print(f"Frame {frame_idx}: No features for next iteration. Will attempt full re-detection.")
+            first_frame = True # This will trigger re-initialization logic in the next iteration
+
         current_max_range = 0
         if len(trajectory_3d_points) > 1:
             coords = np.array(trajectory_3d_points)
@@ -246,7 +251,6 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
         traj_display_img = draw_trajectory(trajectory_3d_points, traj_img_width, traj_img_height, scale=dynamic_scale)
         cv2.imshow('Trajectory', traj_display_img)
         
-        # --- Key Handling ---
         key = cv2.waitKey(30) & 0xff
         if key == 27: print("ESC pressed, stopping."); break
         if key == ord('r'): 
@@ -260,7 +264,7 @@ def run_visual_odometry(dataset_root_dir, current_sequence_name, current_camera,
             if pose_file_writer: 
                 reset_timestamp = (frame_idx + 0.05) * 0.1 
                 initial_quat = R.from_matrix(R_global_pose).as_quat()
-                pose_file_writer.write(f"{reset_timestamp:.6f} {t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
+                pose_file_writer.write(f"{reset_timestamp:.6f} {Y_FACTOR*t_global_pos[0,0]:.6f} {t_global_pos[1,0]:.6f} {t_global_pos[2,0]:.6f} "
                                    f"{initial_quat[0]:.6f} {initial_quat[1]:.6f} {initial_quat[2]:.6f} {initial_quat[3]:.6f}\n")
 
     if pose_file_writer: pose_file_writer.close(); print(f"Pose data saved to {output_pose_file}")
@@ -273,20 +277,20 @@ if __name__ == '__main__':
     camera_matrix_K_main, dist_coeffs_main = load_camera_intrinsics() 
 
     if camera_matrix_K_main is None: exit(1)
-    if not Path(DATASET_DIR).exists() or not Path(DATASET_DIR).is_dir():
-        print(f"Error: DATASET_DIR ('{DATASET_DIR}') not found or is not a directory."); exit(1)
-    if not SEQUENCE_NAME: print(f"Error: SEQUENCE_NAME is not configured."); exit(1)
-
+    # No need to validate DATASET_DIR, SEQUENCE_NAME, CAMERA_VIEW here as IMAGE_FOLDER_TO_USE is now global
+    
     output_file_path_main = Path(OUTPUT_POSE_FILE_NAME) if OUTPUT_POSE_FILE_NAME else None
 
-    print(f"Starting Visual Odometry for sequence: {SEQUENCE_NAME} in {DATASET_DIR}")
+    print(f"Starting Visual Odometry for images in: {IMAGE_FOLDER_TO_USE}") # Changed log
     print(f"FB Error Threshold: {FB_ERROR_THRESHOLD}")
     if output_file_path_main: print(f"Outputting poses to: {output_file_path_main.resolve()}")
     
-    run_visual_odometry(
-        DATASET_DIR, SEQUENCE_NAME, CAMERA_VIEW, 
-        MAX_FRAMES_TO_PROCESS, TRACK_REFRESH_INTERVAL,
-        camera_matrix_K_main, dist_coeffs_main,
-        str(output_file_path_main) if output_file_path_main else None,
-        FB_ERROR_THRESHOLD # Pass the new threshold
+    run_visual_odometry( # Removed unused args
+        K_matrix=camera_matrix_K_main, 
+        dist_coeffs_val=dist_coeffs_main,
+        max_frames=MAX_FRAMES_TO_PROCESS, 
+        track_refresh_interval=TRACK_REFRESH_INTERVAL,
+        output_pose_file=str(output_file_path_main) if output_file_path_main else None,
+        fb_error_thresh=FB_ERROR_THRESHOLD
     )
+
