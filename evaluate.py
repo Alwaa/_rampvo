@@ -172,12 +172,6 @@ def async_data_loader_all_events(
 
     loading_bar = atqdm(range(n_events_voxels))
     loading_bar.set_description("Async Importing Images+Events")
-
-    print(f"First IMU timestamps: {imu_t_ns[:5]}")
-    # Assuming event.t is loaded
-    print(f"First event timestamps (raw): {event.t[:5]}") 
-    print(f"First image timestamps from timestamps.txt: {timestamps[:5]}")
-    print(f"First pose timestamps: {pose_t[:5]}")
  
     i1 = 0
     for i in loading_bar:
@@ -187,12 +181,13 @@ def async_data_loader_all_events(
             event=event, i_start=i0, i_stop=i1
         )
 
-
         frame_ind = corresponding_frame_indices[i]
 
         imfile = image_files[frame_ind]
         image = torchvision.io.read_image(imfile)
         image = normalize_image(images=image, norm_img_to=norm_to)
+
+        tstamp = corresponding_timestamps[frame_ind]
 
         # plot_events(event, image, i0, i1, i) #TODO: Fix absolute paths
         # the index of the smallest error between the event voxel timestamp and the image timestamp is event index
@@ -211,9 +206,9 @@ def async_data_loader_all_events(
             imu_tuple = imu_slice(ts_start, ts_end) #imu_ts, imu_gyro, imu_accel
             # if i0 == 0:
             #     print(imu_tuple)
-            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, imu_tuple)
+            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, tstamp, imu_tuple)
         else:    
-            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind)
+            tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, tstamp)
             
         queue.put(tup)
 
@@ -222,17 +217,17 @@ def async_data_loader_all_events(
     return "Done!:0"
 
 def base_unpacker(item_tuple: tuple) -> tuple:
-    image, events, intrinsics, mask, f_i = item_tuple
+    image, events, intrinsics, mask, f_i, tstamp = item_tuple
     im = image[None, None, ...].cuda()
     ev = events[None, None, ...].float().cuda()
     intr = intrinsics.cuda()
     mask.cuda()
 
-    return (im, ev, intr, mask, f_i)
+    return (im, ev, intr, mask, f_i, tstamp)
 
 #TODO: Should be actual imu data in the end
 def imu_unpacker(item_tuple:tuple) -> tuple:
-    image, events, intrinsics, mask, f_i, imu_tuple = item_tuple
+    image, events, intrinsics, mask, f_i, tstamp, imu_tuple = item_tuple
     im = image[None, None, ...].cuda()
     ev = events[None, None, ...].float().cuda()
     intr = intrinsics.cuda()
@@ -240,7 +235,7 @@ def imu_unpacker(item_tuple:tuple) -> tuple:
 
     # torch.from_numpy(imu_g).float()
 
-    return (im, ev, intr, mask, f_i, imu_tuple)
+    return (im, ev, intr, mask, f_i, tstamp, imu_tuple)
 
 async def _queue_iterator(data_queue: Queue):
     last_size, last_growth  = data_queue.qsize(),time.monotonic()
@@ -322,7 +317,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     #TODO: Shouldn't duplicate the whole thing + Queue enumerate
     t = 0
     if IMU_TESTING:
-        async for (image, events, intrinsics, mask, f_i, imu_tuple) in evaluation_iter_bar:
+        async for (image, events, intrinsics, mask, f_i, tstamp, imu_tuple) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
                 slam(t, 
@@ -339,7 +334,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
                 print("TESTING EARLY")
                 break
     else:
-        async for (image, events, intrinsics, mask, f_i) in evaluation_iter_bar:
+        async for (image, events, intrinsics, mask, f_i, tstamp) in evaluation_iter_bar:
             image, events = resize_input(image, events)
             with Timer("SLAM", enabled=enable_timing):
                 slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
@@ -359,34 +354,23 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
                         patch_centers_on_img,
                         patch_display_size_pixels
                     )
-
-
-                # if hasattr(slam, 'current_graph_patch_start_coords') and slam.current_graph_patch_start_coords is not None and \
-                # hasattr(slam, 'current_graph_patch_flow_vectors') and slam.current_graph_patch_flow_vectors is not None:
-                #    
-                #     visualizer.draw_patch_motion_tracks(
-                #         display_frame_bgr=display_bgr_np,
-                #         current_patch_centers_feat_th=slam.current_graph_patch_start_coords,
-                #         patch_flow_vectors_feat_th=slam.current_graph_patch_flow_vectors,
-                #         P_feat=slam.P_feat,  # Patch size in feature map grid (e.g., 3)
-                #         RES=slam.RES,        # Resolution factor (e.g., 4)
-                #         patch_confidences_feat_th=slam.current_graph_patch_confidences
-                #     )
-                # 
-                # elif hasattr(slam, 'current_patch_coords_feat') and slam.current_patch_coords_feat is not None:
-                #     # Fallback: If only newly extracted patch coords are available (no flow from update yet/failed)
-                #     # This uses the patch coordinates from the patchify step.
-                #     patch_centers_on_img = slam.current_patch_coords_feat.cpu().numpy() * slam.RES
-                #     patch_display_size_pixels = slam.P_feat * slam.RES
-                #     visualizer.draw_patch_locations(
-                #         display_bgr_np,
-                #         patch_centers_on_img,
-                #         patch_display_size_pixels
-                #     )
-
-
                 
                 time.sleep(0.05)
+                try:
+                    #print(f_i, slam.poses[0][slam.n])
+                    visualizer.add_pose(pose_gt=slam.poses_[slam.n - 1],pose_est=slam.stabilized_pose)
+                    #visualizer.add_pose(pose_est=slam.poses_[slam.n - 1])
+
+                    # current_est_pose = slam.poses.get(tstamp.item())
+
+                    # # Add the current ground truth and estimated poses to the visualizer
+                    # if current_est_pose is not None:
+                    #     visualizer.add_pose(pose_gt=gt_pose, pose_est=current_est_pose)
+
+                    # Redraw the trajectory plot with the new point
+                    visualizer.plot_trajectory_2d()
+                except:
+                    pass
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break

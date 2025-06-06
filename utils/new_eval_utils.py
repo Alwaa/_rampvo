@@ -44,6 +44,11 @@ class Visualizer:
         self._track_refresh_interval = track_refresh_interval
         self._frame_count_since_last_refresh = 0
 
+        # Trajectory 
+        self.gt_points = []
+        self.est_points = []
+
+
         # setting up OpenCV windows here
         cv2.namedWindow(FEATURE_TRACK_WINDOW, cv2.WINDOW_NORMAL)
         cv2.namedWindow(TAJECTORY_WINDOW, cv2.WINDOW_NORMAL)
@@ -52,6 +57,61 @@ class Visualizer:
 
 
         print(f"Visualizer initialized. Trajectory view: {traj_img_width}x{traj_img_height}, Track refresh: {track_refresh_interval} frames.")
+    
+    def add_pose(self, pose_gt=None, pose_est=None):
+        """
+        Adds new ground truth and/or estimated poses to the trajectory lists.
+        Handles both lietorch.SE3 objects and 7-dimensional tensors.
+        """
+        # --- Handle Ground Truth Pose ---
+        if pose_gt is not None:
+            # Raw tensor [tx, ty, tz, qx, qy, qz, qw]
+            # We only need the translation part (the first 3 elements)
+            self.gt_points.append(pose_gt[:3].cpu().numpy().flatten())
+        
+        # --- Handle Estimated Pose ---
+        if pose_est is not None:
+            # Raw tensor [tx, ty, tz, qx, qy, qz, qw]
+            # We only need the translation part (the first 3 elements)
+            self.est_points.append(pose_est[:3].cpu().numpy().flatten())
+    
+    def plot_trajectory_2d(self):
+        """
+        Plots the stored ground truth (blue) and estimated (green) trajectories
+        on a white background. It automatically scales the plot to fit the window.
+        """
+        traj_img = np.ones((self.traj_img_height, self.traj_img_width, 3), dtype=np.uint8) * 255
+        center_x, center_y = self.traj_img_width // 2, self.traj_img_height // 2
+
+
+        if not self.est_points:
+            cv2.imshow(TAJECTORY_WINDOW, traj_img)
+            return traj_img
+
+        scale_pints = np.array(self.est_points)
+        # Use the max of absolute x and u coordinates for scaling
+        max_coord = np.max(np.abs(scale_pints[:, [0, 1]])) if scale_pints.shape[0] > 0 else 1.0
+        
+        # Calculate scale to fit
+        scale = (min(self.traj_img_width, self.traj_img_height) / (2.5 * max_coord)) if max_coord > 0 else 1.0
+
+        # --- Draw Ground Truth Trajectory (Blue) ---
+        if len(self.gt_points) > 1:
+            gt_screen_pts = np.array([(center_x + p[0] * scale, center_y + p[1] * scale) for p in self.gt_points], dtype=np.int32)
+            cv2.polylines(traj_img, [gt_screen_pts], isClosed=False, color=(255, 0, 0), thickness=2)
+            
+        # --- Draw Estimated Trajectory (Green) ---
+        if len(self.est_points) > 1:
+            est_screen_pts = np.array([(center_x + p[0] * scale, center_y + p[1] * scale) for p in self.est_points], dtype=np.int32)
+            cv2.polylines(traj_img, [est_screen_pts], isClosed=False, color=(0, 255, 0), thickness=2)
+            # Mark the current estimated position with a red circle
+            cv2.circle(traj_img, tuple(est_screen_pts[-1]), 5, (0, 0, 255), -1)
+
+        # scale legend
+        cv2.putText(traj_img, f"Scale: {scale:.2f} px/m", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
+        
+        cv2.imshow(TAJECTORY_WINDOW, traj_img)
+        return traj_img
 
     def _initialize_track_mask(self, frame_shape_with_channels):
         """Initializes or re-initializes the track mask if needed based on frame dimensions."""

@@ -159,6 +159,30 @@ class Ramp_vo:
     @property
     def gmap(self):
         return self.gmap_.view(1, self.mem * self.M, 128, 3, 3)
+    
+    @property
+    def stabilized_pose(self):
+        """
+        Returns a pose that is a few frames behind the most recent one.
+        This pose is more 'settled' as it has been through the BA optimizer
+        more times than the absolute latest pose.
+        """
+        # Define how many frames of lag you want for a more stable visualization.
+        # A value of 5-15 is usually good.
+        lag_frames = 30
+
+        if self.n > lag_frames:
+            # Get the pose from 'lag_frames' ago from the main buffer.
+            # self.n is the current number of active frames.
+            # The index is self.n - 1 - lag_frames to get the desired lag.
+            stabilized_index = self.n - 1 - lag_frames
+            return self.poses[0][stabilized_index]
+        elif self.n > 0:
+            # If we don't have enough frames for the full lag, return the oldest pose.
+            return self.poses[0][0]
+        else:
+            # If no frames have been processed, return None.
+            return None
 
     def get_pose(self, t):
         if t in self.traj:
@@ -478,7 +502,7 @@ class Ramp_vo:
                     with Timer(
                         "SLAM.UpdateStateAttr.NotDampedLin", enabled=self.enable_timing
                     ):
-                        tvec_qvec = self.poses[self.n - 1]
+                        tvec_qvec = self.poses[self.n - 1] #TODO: Check if poses or poses_
                         self.poses_[self.n] = tvec_qvec
 
 

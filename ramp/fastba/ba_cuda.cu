@@ -441,7 +441,10 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor jj,
     torch::Tensor kk,
     const int PPF,
-    const int t0, const int t1, const int iterations, bool eff_impl)
+    const int t0, 
+    const int t1, 
+    const int iterations, 
+    bool eff_impl)
 {
 
   auto ktuple = torch::_unique(kk, true, true);
