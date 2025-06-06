@@ -48,6 +48,9 @@ class Visualizer:
         self.gt_points = []
         self.est_points = []
 
+        self.pre_update_points = []
+        self.post_update_points = []
+
 
         # setting up OpenCV windows here
         cv2.namedWindow(FEATURE_TRACK_WINDOW, cv2.WINDOW_NORMAL)
@@ -57,6 +60,25 @@ class Visualizer:
 
 
         print(f"Visualizer initialized. Trajectory view: {traj_img_width}x{traj_img_height}, Track refresh: {track_refresh_interval} frames.")
+    
+    def update_trajectories(self, gt_pose, pre_update_buffer, post_update_buffer, num_valid_poses):
+        """
+        Updates all three trajectory lists for visualization.
+        """
+        # 1. Add new ground truth point
+        if gt_pose is not None:
+            # Raw tensor
+            self.gt_points.append(gt_pose[:3].cpu().numpy().flatten())
+
+        # 2. Refresh the pre-update ("old") trajectory
+        if pre_update_buffer is not None and num_valid_poses > 0:
+            valid_poses = pre_update_buffer[:num_valid_poses, :3]
+            self.pre_update_points = [row.cpu().numpy() for row in valid_poses]
+
+        # 3. Refresh the post-update ("new") trajectory
+        if post_update_buffer is not None and num_valid_poses > 0:
+            valid_poses = post_update_buffer[:num_valid_poses, :3]
+            self.post_update_points = [row.cpu().numpy() for row in valid_poses]
     
     def add_pose(self, pose_gt=None, pose_est=None):
         """
@@ -74,8 +96,50 @@ class Visualizer:
             # Raw tensor [tx, ty, tz, qx, qy, qz, qw]
             # We only need the translation part (the first 3 elements)
             self.est_points.append(pose_est[:3].cpu().numpy().flatten())
-    
+
     def plot_trajectory_2d(self):
+        """
+        Plots all three trajectories:
+        - Ground Truth (Blue)
+        - Pre-Update Estimate (Grey, Dashed)
+        - Post-Update Estimate (Green, Solid)
+        """
+        traj_img = np.ones((self.traj_img_height, self.traj_img_width, 3), dtype=np.uint8) * 255
+        center_x, center_y = self.traj_img_width // 2, self.traj_img_height // 2
+        
+        all_points = self.post_update_points
+        if not all_points:
+            print("NONE TRAJ")
+            cv2.imshow(TAJECTORY_WINDOW, traj_img)
+            return traj_img
+
+        # Auto-scaling logic
+        all_points_np = np.array([p for p in self.post_update_points if p is not None])
+        max_coord = np.max(np.abs(all_points_np[:, [0, 2]])) if all_points_np.shape[0] > 0 else 1.0
+        scale = (min(self.traj_img_width, self.traj_img_height) / (2.5 * max_coord)) if max_coord > 0 else 1.0
+
+        # --- Draw All Trajectories ---
+        # Ground Truth (Blue)
+        if len(self.gt_points) > 1:
+            gt_pts = np.array([(center_x + p[0]*scale, center_y + p[2]*scale) for p in self.gt_points], dtype=np.int32)
+            cv2.polylines(traj_img, [gt_pts], isClosed=False, color=(255, 0, 0), thickness=2)
+
+        # Pre-Update/Old Estimate (Grey, Dashed)
+        if len(self.pre_update_points) > 1:
+            pre_pts = np.array([(center_x + p[0]*scale, center_y + p[2]*scale) for p in self.pre_update_points], dtype=np.int32)
+            # Draw dashed line by drawing circles
+            cv2.polylines(traj_img, [pre_pts], isClosed=False, color=(200, 200, 200), thickness=2)
+
+        # Post-Update/New Estimate (Green, Solid)
+        if len(self.post_update_points) > 1:
+            post_pts = np.array([(center_x + p[0]*scale, center_y + p[2]*scale) for p in self.post_update_points], dtype=np.int32)
+            cv2.polylines(traj_img, [post_pts], isClosed=False, color=(0, 255, 0), thickness=2)
+            cv2.circle(traj_img, tuple(post_pts[-1]), 5, (0, 0, 255), -1) # Mark current position
+
+        cv2.imshow(TAJECTORY_WINDOW, traj_img)
+        return traj_img
+    
+    def __plot_trajectory_2d(self):
         """
         Plots the stored ground truth (blue) and estimated (green) trajectories
         on a white background. It automatically scales the plot to fit the window.
@@ -91,7 +155,7 @@ class Visualizer:
         scale_pints = np.array(self.est_points)
         # Use the max of absolute x and u coordinates for scaling
         max_coord = np.max(np.abs(scale_pints[:, [0, 1]])) if scale_pints.shape[0] > 0 else 1.0
-        
+
         # Calculate scale to fit
         scale = (min(self.traj_img_width, self.traj_img_height) / (2.5 * max_coord)) if max_coord > 0 else 1.0
 

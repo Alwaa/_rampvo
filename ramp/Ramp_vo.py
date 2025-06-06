@@ -559,6 +559,10 @@ class Ramp_vo:
                     self.update()
 
         elif self.is_initialized:
+
+            # snapshot of active poses right before the BA optimization
+            self.pre_update_poses_for_viz = self.poses_[:self.n].clone()
+
             with Timer("SLAM.InitializedUpdate", enabled=self.enable_timing):
                 self.update()
             with Timer("SLAM.InitializedKeyframe", enabled=self.enable_timing):

@@ -357,8 +357,15 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
                 
                 time.sleep(0.05)
                 try:
+
+                    visualizer.update_trajectories(
+                    gt_pose=None,
+                    pre_update_buffer=slam.pre_update_poses_for_viz,
+                    post_update_buffer=slam.poses_[:slam.n], # slam.poses points to the updated poses_ buffer
+                    num_valid_poses=slam.n
+                    )
                     #print(f_i, slam.poses[0][slam.n])
-                    visualizer.add_pose(pose_gt=slam.poses_[slam.n - 1],pose_est=slam.stabilized_pose)
+                    # visualizer.add_pose(pose_gt=slam.poses_[slam.n - 1],pose_est=slam.stabilized_pose)
                     #visualizer.add_pose(pose_est=slam.poses_[slam.n - 1])
 
                     # current_est_pose = slam.poses.get(tstamp.item())
