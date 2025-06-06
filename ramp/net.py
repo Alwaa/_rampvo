@@ -1,8 +1,6 @@
-import time
 import torch
 import numpy as np
 import torch.nn as nn
-from functools import partial
 import torch.nn.functional as F
 
 from . import fastba
@@ -116,8 +114,6 @@ class Patchifier(nn.Module):
         super(Patchifier, self).__init__()
         self.input_mode = input_mode
         self.P = patch_size
-        # self.input_mode = "SingleScale"
-        # self.input_mode = "MultiScale"
 
         self.enable_timing = True ##Remove default! TODO:
 
@@ -179,7 +175,7 @@ class Patchifier(nn.Module):
                 imap = self.inet(input_) / 4.0
 
         if mask is not None and not mask.any():
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
         b, n, c, h, w = fmap.shape
 
@@ -234,7 +230,55 @@ class Patchifier(nn.Module):
         
         with Timer("SLAM.Patchify.clr", enabled=self.enable_timing):
             clr = altcorr.patchify(images[0], 4*(coords + 0.5), 0).view(b, -1, 3)
-        return fmap, gmap, imap, patches, index, clr
+
+        # Attempt to return patch coordinates for vizualization
+        coords_to_return = coords.view(b, n * patches_per_image, 2) if coords is not None else None
+        
+
+        return fmap, gmap, imap, patches, index, clr, coords_to_return
+
+    # visualizing gradient bias
+    def __image_gradient(self, images_tensor):
+        # images_tensor: (B, N, C, H, W) or (B*N, C, H, W)
+        # Output: (B, N, H_feat, W_feat) or (B*N, 1, H_feat, W_feat)
+        if images_tensor.dim() == 5:
+            bn, t, c, h, w = images_tensor.shape
+            img_reshaped = images_tensor.reshape(bn*t, c, h, w)
+        else: # (BN, C, H, W)
+            img_reshaped = images_tensor
+            bn_t, c, h, w = img_reshaped.shape
+            bn = 1 # Effectively
+            t = bn_t
+
+
+        # Convert to grayscale: sum over channel dim, or use transforms.Grayscale
+        # Assuming CHW, and C is RGB or similar
+        if img_reshaped.shape[1] == 3: # RGB
+            gray = img_reshaped.mean(dim=1, keepdim=True) # (BN, 1, H, W)
+        else: # Grayscale or other
+            gray = img_reshaped[:,0:1,:,:] # Take first channel (BN, 1, H, W)
+
+        # Normalize to 0-255 range if it's not already (e.g. if it's -0.5 to 1.5)
+        # Assuming normalized input (e.g. -0.5 to 1.5) -> shift to positive then scale
+        gray = (gray + 0.5) * (255.0/2.0) # Adjust based on your actual normalization
+        
+        dx = gray[..., :-1, 1:] - gray[..., :-1, :-1]  # (BN, 1, H-1, W-1)
+        dy = gray[..., 1:, :-1] - gray[..., :-1, :-1]  # (BN, 1, H-1, W-1)
+        
+        # Pad to get same size as original gray - this might not be necessary if pooling next
+        dx = F.pad(dx, (0, 1, 0, 1), "replicate") # (BN, 1, H, W)
+        dy = F.pad(dy, (0, 1, 0, 1), "replicate") # (BN, 1, H, W)
+
+        g = torch.sqrt(dx**2 + dy**2) # (BN, 1, H, W)
+        
+        # Pool to feature map resolution (H/RES, W/RES), RES=4
+        g_pooled = F.avg_pool2d(g, 4, 4) # (BN, 1, H/4, W/4)
+        
+        if images_tensor.dim() == 5: # Reshape back if original was 5D
+            return g_pooled.view(bn, t, g_pooled.shape[2], g_pooled.shape[3]) # (B,N,Hf,Wf)
+        else:
+            return g_pooled # (BN,1,Hf,Wf)
+
 
 
 class CorrBlock:

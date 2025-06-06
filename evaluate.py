@@ -7,6 +7,7 @@ import sys
 import glob
 import threading
 import time
+import cv2
 import yaml
 import json
 import torch
@@ -47,7 +48,7 @@ from ramp.utils import (
 from ramp.config import cfg as VO_cfg
 from ramp.Ramp_vo import Ramp_vo
 
-from utils.new_eval_utils import save_results
+from utils.new_eval_utils import save_results, Visualizer
 
 from new_xrvio import XRVIO
 
@@ -312,6 +313,8 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         
     else:
         slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
+    
+    visualizer = Visualizer() 
 
     evaluation_iter_bar = atqdm(_queue_iterator(data_queue))
     evaluation_iter_bar.set_description("Async Evaluating")
@@ -344,6 +347,49 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         
             if mask:
                 img_timestamps.append(f_i)
+            
+            if slam.current_patch_coords_feat is not None:
+                # Coords are in feature map scale (H/RES, W/RES) of image_resized_for_slam
+                patch_centers_on_img = slam.current_patch_coords_feat.cpu().numpy() * slam.RES
+                patch_display_size_pixels = slam.P_feat * slam.RES
+                display_img = _image_to_cv_fmt(image)                
+                
+                visualizer.draw_patch_locations(
+                        display_img,
+                        patch_centers_on_img,
+                        patch_display_size_pixels
+                    )
+
+
+                # if hasattr(slam, 'current_graph_patch_start_coords') and slam.current_graph_patch_start_coords is not None and \
+                # hasattr(slam, 'current_graph_patch_flow_vectors') and slam.current_graph_patch_flow_vectors is not None:
+                #    
+                #     visualizer.draw_patch_motion_tracks(
+                #         display_frame_bgr=display_bgr_np,
+                #         current_patch_centers_feat_th=slam.current_graph_patch_start_coords,
+                #         patch_flow_vectors_feat_th=slam.current_graph_patch_flow_vectors,
+                #         P_feat=slam.P_feat,  # Patch size in feature map grid (e.g., 3)
+                #         RES=slam.RES,        # Resolution factor (e.g., 4)
+                #         patch_confidences_feat_th=slam.current_graph_patch_confidences
+                #     )
+                # 
+                # elif hasattr(slam, 'current_patch_coords_feat') and slam.current_patch_coords_feat is not None:
+                #     # Fallback: If only newly extracted patch coords are available (no flow from update yet/failed)
+                #     # This uses the patch coordinates from the patchify step.
+                #     patch_centers_on_img = slam.current_patch_coords_feat.cpu().numpy() * slam.RES
+                #     patch_display_size_pixels = slam.P_feat * slam.RES
+                #     visualizer.draw_patch_locations(
+                #         display_bgr_np,
+                #         patch_centers_on_img,
+                #         patch_display_size_pixels
+                #     )
+
+
+                
+                time.sleep(0.05)
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
     
     if t == 0:
@@ -352,6 +398,22 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     poses, tstamps = slam.terminate()
 
     return poses, tstamps, img_timestamps
+
+def _image_to_cv_fmt(image):
+    # Convert image_resized_for_slam (network input) to BGR for display
+    img_to_show_tensor = image.squeeze(0).squeeze(0) # CHW tensor
+
+    # Denormalization # Default normalization: 2 * (img/255) - 0.5
+    img_denorm = torch.clamp((img_to_show_tensor + 0.5) * (255.0 / 2.0), 0, 255)
+
+    display_bgr_np = img_denorm.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+    
+    if display_bgr_np.shape[2] == 1: # Grayscale
+        display_bgr_np = cv2.cvtColor(display_bgr_np, cv2.COLOR_GRAY2BGR)
+    elif display_bgr_np.shape[2] == 3: # Check if it's RGB and convert to BGR
+        display_bgr_np = cv2.cvtColor(display_bgr_np, cv2.COLOR_RGB2BGR)
+
+    return display_bgr_np
 
 
 def async_evaluate_sequence(

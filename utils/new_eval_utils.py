@@ -2,9 +2,11 @@ import numpy as np
 import os
 import os.path as osp
 import cv2
+import torch
 
 FEATURE_TRACK_WINDOW = "Feature Tracks - VO"
 TAJECTORY_WINDOW = "Trajectory"
+PATCH_WINDOW = 'Patches Visualization'
 
 
 def save_results(
@@ -46,6 +48,9 @@ class Visualizer:
         cv2.namedWindow(FEATURE_TRACK_WINDOW, cv2.WINDOW_NORMAL)
         cv2.namedWindow(TAJECTORY_WINDOW, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(TAJECTORY_WINDOW, self.traj_img_width, self.traj_img_height)
+        cv2.namedWindow(PATCH_WINDOW, cv2.WINDOW_NORMAL)
+
+
         print(f"Visualizer initialized. Trajectory view: {traj_img_width}x{traj_img_height}, Track refresh: {track_refresh_interval} frames.")
 
     def _initialize_track_mask(self, frame_shape_with_channels):
@@ -88,7 +93,122 @@ class Visualizer:
         # Add the accumulated tracks from the mask to the current visual frame
         vis_img_tracks = cv2.add(vis_frame, self.track_visualization_mask)
         cv2.imshow(FEATURE_TRACK_WINDOW, vis_img_tracks)
-        return 
+        return vis_img_tracks
+    
+    def draw_patch_locations(self, 
+                             display_frame_bgr, 
+                             patch_centers_xy, 
+                             patch_size_pixels, 
+                             color=(0, 0, 255), 
+                             thickness=2):
+        """
+        Draws patch bounding boxes on the display frame.
+        Args:
+            display_frame_bgr: The BGR image (NumPy array) to draw on.
+            patch_centers_xy: NumPy array of shape (M, 2) with (x, y) centers of M patches in image pixel coordinates.
+            patch_size_pixels: The size (width and height) of the patch square in image pixels.
+            color: Tuple for patch color (B, G, R).
+            thickness: Thickness of the rectangle lines.
+        """
+        vis_frame = display_frame_bgr.copy()
+        P_half = patch_size_pixels // 2
+
+        for i in range(patch_centers_xy.shape[0]):
+            center_x = patch_centers_xy[i, 0]
+            center_y = patch_centers_xy[i, 1]
+            
+            x1 = int(center_x - P_half)
+            y1 = int(center_y - P_half)
+            x2 = int(center_x + P_half)
+            y2 = int(center_y + P_half)
+            
+            cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, thickness)
+
+        # --- Scale the output for PATCH_WINDOW by 2 ---
+        display_scale_factor = 4
+        if vis_frame.shape[0] > 0 and vis_frame.shape[1] > 0: # Check if frame is not empty
+            # Calculate new dimensions
+            new_width = vis_frame.shape[1] * display_scale_factor
+            new_height = vis_frame.shape[0] * display_scale_factor
+            # Resize the frame
+            vis_frame_display = cv2.resize(vis_frame, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        else:
+            vis_frame_display = vis_frame # Fallback to original if empty or problematic
+        
+
+        cv2.imshow(PATCH_WINDOW, vis_frame_display)
+        return vis_frame_display
+
+    def draw_patch_motion_tracks(self, display_frame_bgr,
+                                 current_patch_centers_feat_th, # Starting points of flows, shape (M, 2)
+                                 patch_flow_vectors_feat_th,    # Flow vectors (deltas), shape (M, 2)
+                                 P_feat, RES,                   # Patch size in feature map, Resolution scale
+                                 box_color=(0, 255, 0), track_color=(255, 0, 0),
+                                 patch_confidences_feat_th=None, # Confidences, shape (M, 2) or (M, 1)
+                                 thickness=2):
+        vis_frame = display_frame_bgr.copy()
+
+        if current_patch_centers_feat_th is None or patch_flow_vectors_feat_th is None:
+            # Fallback: if flow is missing, just draw current patch locations if available
+            if current_patch_centers_feat_th is not None:
+                patch_centers_img_np = (current_patch_centers_feat_th * RES).cpu().numpy()
+                patch_size_img = P_feat * RES
+                return self.draw_patch_locations(vis_frame,
+                                                 patch_centers_img_np,
+                                                 patch_size_img,
+                                                 color=box_color, thickness=thickness)
+            else:
+                cv2.imshow(PATCH_WINDOW, vis_frame)
+                return vis_frame
+        
+        num_patches = current_patch_centers_feat_th.shape[0]
+        if num_patches == 0 or num_patches != patch_flow_vectors_feat_th.shape[0]:
+            print(f"Warning: Mismatch in patch numbers or zero patches. Centers: {num_patches}, Flows: {patch_flow_vectors_feat_th.shape[0]}")
+            cv2.imshow(PATCH_WINDOW, vis_frame)
+            return vis_frame
+
+        # Calculate previous (start of flow) and current (end of flow) positions in feature map scale
+        # The 'current_patch_centers_feat_th' are the P_start for the flow vectors.
+        # The 'P_end' would be P_start + flow.
+        start_positions_feat = current_patch_centers_feat_th
+        end_positions_feat = current_patch_centers_feat_th + patch_flow_vectors_feat_th
+
+        # Convert to image scale for drawing
+        start_centers_img_np = (start_positions_feat * RES).cpu().numpy()
+        end_centers_img_np = (end_positions_feat * RES).cpu().numpy()
+
+        patch_size_img = P_feat * RES # Patch display size in image pixels
+        P_half_img = patch_size_img // 2
+
+        # --- Drawing ---
+        for i in range(num_patches):
+            sx, sy = int(start_centers_img_np[i, 0]), int(start_centers_img_np[i, 1]) # Start of arrow
+            ex, ey = int(end_centers_img_np[i, 0]), int(end_centers_img_np[i, 1])     # End of arrow (current pos)
+
+            current_track_color_tuple = tuple(track_color) # Default track color
+
+            if patch_confidences_feat_th is not None and i < patch_confidences_feat_th.shape[0]:
+                # Use confidence to modulate color (e.g., brighter for higher confidence)
+                # Assuming confidence is (M, 2), take the mean. If (M,1) just use it.
+                confidence = patch_confidences_feat_th[i].mean().item() if patch_confidences_feat_th.shape[1]==2 else patch_confidences_feat_th[i].item()
+                # Example: Scale color intensity by confidence. Min intensity 0.2 to keep it visible.
+                alpha = 0.2 + 0.8 * confidence
+                current_track_color_tuple = tuple(int(c * alpha) for c in track_color)
+
+            # Draw the flow vector (line from start to end)
+            cv2.line(vis_frame, (sx, sy), (ex, ey), current_track_color_tuple, thickness)
+            # Draw a small circle at the start of the flow vector
+            cv2.circle(vis_frame, (sx, sy), radius=max(1, int(thickness/2)), color=current_track_color_tuple, thickness=-1)
+
+            # Draw the patch box at the END of the flow vector (current estimated position)
+            box_x1, box_y1 = ex - P_half_img, ey - P_half_img
+            box_x2, box_y2 = ex + P_half_img, ey + P_half_img
+            cv2.rectangle(vis_frame, (box_x1, box_y1), (box_x2, box_y2), box_color, thickness)
+
+        cv2.imshow(PATCH_WINDOW, vis_frame)
+        return vis_frame
+
+
 
     def draw_trajectory_map(self, trajectory_points_list, scale=10):
         """Draws the 2D trajectory map (viewed from top-down, X-Z plane)."""

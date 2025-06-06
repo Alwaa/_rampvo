@@ -99,6 +99,15 @@ class Ramp_vo:
         # store relative poses for removed frames
         self.delta = {}
 
+
+        # For Viz        
+        self.current_patch_coords_feat = None # Current frame's patch coords (feature map scale)
+        self.current_step_flow_map = None     # Current frame's flow (t-1 -> t) (feature map scale)
+        self.current_patch_flow_vectors_feat = None
+        self.current_dense_flow_map_feat = None
+        self.current_active_patch_coords_feat = None
+        self.P_feat = self.network.P  # Patch size in feature map grid
+
     def load_weights(self, network):
         # load network from checkpoint file
         if isinstance(network, str):
@@ -305,6 +314,7 @@ class Ramp_vo:
             lmbda = torch.as_tensor([1e-4], device="cuda")
             weight = weight.float()
             target = coords[..., self.P // 2, self.P // 2] + delta.float()
+            curr_patch_centers = coords[..., self.P // 2, self.P // 2]
 
             with Timer("Update.FilterFeat", enabled=self.enable_timing):
                 weight = filter_features(
@@ -314,6 +324,9 @@ class Ramp_vo:
                 )
 
                 self.last_weight = weight.clone()
+
+            # New Viz:
+            self._update_store_new_viz(delta, weight, curr_patch_centers)
         
         with Timer("Update.BA", enabled=self.enable_timing):
             t0 = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
@@ -339,14 +352,41 @@ class Ramp_vo:
             except Exception as e:
                 print(f"WARNING: BA failed...{e}")
 
-            points = pops.point_cloud(
-                SE3(self.poses),
-                self.patches[:, : self.m],
-                self.intrinsics,
-                self.ix[: self.m],
-            )
-            points = (points[..., 1, 1, :3] / points[..., 1, 1, 3:]).reshape(-1, 3)
-            self.points_[: len(points)] = points[:]
+        # Old Viz
+        self._update_store_old_viz()
+
+
+    def _update_store_new_viz(self, delta, weight, current_patch_centers_feat):
+        """ Call Before BA"""
+        # Store patch-specific flow vectors and confidences
+        if delta is not None and delta.ndim == 3 and delta.shape[0] == 1 and delta.shape[2] == 2:
+            # delta shape is (1, #edges, 2)
+            self.current_graph_patch_flow_vectors = delta.squeeze(0).clone() # Shape: (#edges, 2)
+            self.current_graph_patch_start_coords = current_patch_centers_feat.squeeze(0).clone() # Shape: (#edges, 2)
+
+            if weight is not None and weight.shape == delta.shape:
+                self.current_graph_patch_confidences = weight.squeeze(0).clone() # Shape: (#edges, 2)
+                # Optionally, convert confidences to uncertainties:
+                # self.current_graph_patch_uncertainties = 1.0 - self.current_graph_patch_confidences
+            else:
+                print(f"Warning: Weight from network.update has unexpected shape or is None. Weight shape: {weight.shape if weight is not None else 'None'}")
+                self.current_graph_patch_confidences = None
+        else:
+            print(f"Warning: Delta from network.update has unexpected shape: {delta.shape if delta is not None else 'None'}. Expected (1, #edges, 2).")
+            self.current_graph_patch_flow_vectors = None
+            self.current_graph_patch_start_coords = None
+            self.current_graph_patch_confidences = None
+
+    def _update_store_old_viz(self):
+        """ Call AFTER BA"""   
+        points = pops.point_cloud(
+            SE3(self.poses),
+            self.patches[:, : self.m],
+            self.intrinsics,
+            self.ix[: self.m],
+        )
+        points = (points[..., 1, 1, :3] / points[..., 1, 1, 3:]).reshape(-1, 3)
+        self.points_[: len(points)] = points[:]
 
     def __edges_forw(self):
         r = self.cfg.PATCH_LIFETIME
@@ -379,34 +419,22 @@ class Ramp_vo:
 
         with Timer("SLAM.PreProcess", enabled=self.enable_timing):
             input_ = preprocess_input(input_tensor=input_tensor)
+            events_in, images_in, mask_in = input_ # Just for image for viz mostly
 
         with Timer("SLAM.Patchify", enabled=self.enable_timing):
             with autocast:
-                fmap, gmap, imap, patches, _index, clr = self.network.patchify(
+                fmap, gmap, imap, patches, _index, clr, coords_patch_feat = self.network.patchify(
                     input_=input_,
                     patches_per_image=self.cfg.PATCHES_PER_FRAME,
                     event_bias=self.event_bias,
                     reinit_hidden=True if tstamp == 0 else False,
                 )
-        
-        ############################## Saving embeddings ################################
-
-        if save_slam_steps_path is not None:
-            print("SAVING TO: ", save_slam_steps_path)
-            os.makedirs(save_slam_steps_path, exist_ok=True)
-            dump = {
-                "fmap": fmap.detach().cpu(),
-                "gmap": gmap.detach().cpu(),
-                "imap": imap.detach().cpu(),
-                "patches": patches.detach().cpu(),
-                "_index": _index,
-                "clr": clr.detach().cpu(),
-                "intrinsics": intrinsics,
-            }
-            fn = os.path.join(save_slam_steps_path, f"{tstamp:06d}_patchify.pt")
-            torch.save(dump, fn)
-
-        #################################################################################
+            
+            if coords_patch_feat is not None:
+                self.current_patch_coords_feat = coords_patch_feat.squeeze(0) # Shape (M, 2) assuming batch size 1
+            else:
+                self.current_patch_coords_feat = None
+    
 
         if len(input_) > 2:
             _, _, mask = input_
