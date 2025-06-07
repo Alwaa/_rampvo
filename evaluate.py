@@ -27,6 +27,13 @@ from evo.core.trajectory import PoseTrajectory3D
 import matplotlib.pyplot as plt
 from evo.tools import plot
 
+import warnings
+import matplotlib
+
+# filtering faulty deprication warnings TODO: Remove when updated/fixed
+warnings.filterwarnings("ignore", category=matplotlib.MatplotlibDeprecationWarning)
+
+
 from ramp.lietorch.groups import SE3
 from utils.seed_everything import seed_everything
 from ramp.data_readers.TartanEvent import TartanEvent
@@ -199,13 +206,8 @@ def async_data_loader_all_events(
             ts_start_ns, ts_end_ns = event.t[i0], event.t[i1 - 1] # first and last event in voxel
             ts_start, ts_end = ts_start_ns, ts_end_ns
 
-            # pose = pose_last(ts_start,ts_end)
-            # pose = torch.from_numpy(pose).float()
-
-
             imu_tuple = imu_slice(ts_start, ts_end) #imu_ts, imu_gyro, imu_accel
-            # if i0 == 0:
-            #     print(imu_tuple)
+            
             tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, tstamp, imu_tuple)
         else:    
             tup = (image, event_voxel, intrinsics, torch.tensor([mask]), frame_ind, tstamp)
@@ -301,13 +303,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
 
     img_timestamps = []
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
-    if IMU_TESTING:
-        sampling_period_s = 0.0033333333333333
-        actual_imu_sampling_period_ns = sampling_period_s * 1e9
-        slam = XRVIO(sampling_period_s) #dt hardcoded for now
-        
-    else:
-        slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
+    slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
     
     visualizer = Visualizer() 
 
@@ -316,71 +312,67 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
 
     #TODO: Shouldn't duplicate the whole thing + Queue enumerate
     t = 0
-    if IMU_TESTING:
-        async for (image, events, intrinsics, mask, f_i, tstamp, imu_tuple) in evaluation_iter_bar:
-            image, events = resize_input(image, events)
-            with Timer("SLAM", enabled=enable_timing):
-                slam(t, 
-                     input_tensor=(events, image, mask), 
-                     intrinsics=intrinsics, 
-                     curr_imu_data=imu_tuple, 
-                     save_slam_steps_path = save_slam_steps_path)
-            t += 1
+    async for iter_tuple in evaluation_iter_bar:
         
-            if mask:
-                img_timestamps.append(f_i)
+        if IMU_TESTING:
+            (image, events, intrinsics, mask, f_i, tstamp, imu_tuple) = iter_tuple
+        else:
+            (image, events, intrinsics, mask, f_i, tstamp) = iter_tuple
+            imu_tuple = None
+
+        image, events = resize_input(image, events)
+        with Timer("SLAM", enabled=enable_timing):
+            slam(t, 
+                input_tensor=(events, image, mask),
+                timestamp=tstamp,
+                intrinsics=intrinsics, 
+                curr_imu_data=imu_tuple)
+        t += 1
+    
+        if mask:
+            img_timestamps.append(f_i)
+        else:
+            continue
             
-            if t == 1162:
-                print("TESTING EARLY")
+        if slam.current_patch_coords_feat is not None:
+            # Coords are in feature map scale (H/RES, W/RES) of image_resized_for_slam
+            patch_centers_on_img = slam.current_patch_coords_feat.cpu().numpy() * slam.RES
+            patch_display_size_pixels = slam.P_feat * slam.RES
+            display_img = _image_to_cv_fmt(image)                
+            
+            visualizer.draw_patch_locations(
+                    display_img,
+                    patch_centers_on_img,
+                    patch_display_size_pixels
+                )
+            
+            #time.sleep(0.05)
+            visualizer.overrite_est_traj_(slam.get_current_trajectory()[0])
+            visualizer.plot_trajectory_2d()
+            try:
+
+                # visualizer.update_trajectories(
+                # gt_pose=None,
+                # pre_update_buffer=slam.pre_update_poses_for_viz,
+                # post_update_buffer=slam.poses_[:slam.n], # slam.poses points to the updated poses_ buffer
+                # num_valid_poses=slam.n
+                # )
+                #print(f_i, slam.poses[0][slam.n])
+                #visualizer.add_pose(pose_est=slam.stabilized_pose)
+                #visualizer.add_pose(pose_est=slam.poses_[slam.n - 1])
+
+                # current_est_pose = slam.poses.get(tstamp.item())
+
+                # # Add the current ground truth and estimated poses to the visualizer
+                # if current_est_pose is not None:
+                #     visualizer.add_pose(pose_gt=gt_pose, pose_est=current_est_pose)
+
+                pass
+            except:
+                print("NO TRAJ VIZ")
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-    else:
-        async for (image, events, intrinsics, mask, f_i, tstamp) in evaluation_iter_bar:
-            image, events = resize_input(image, events)
-            with Timer("SLAM", enabled=enable_timing):
-                slam(t, input_tensor=(events, image, mask), intrinsics=intrinsics)
-            t += 1
-        
-            if mask:
-                img_timestamps.append(f_i)
-            
-            if slam.current_patch_coords_feat is not None:
-                # Coords are in feature map scale (H/RES, W/RES) of image_resized_for_slam
-                patch_centers_on_img = slam.current_patch_coords_feat.cpu().numpy() * slam.RES
-                patch_display_size_pixels = slam.P_feat * slam.RES
-                display_img = _image_to_cv_fmt(image)                
-                
-                visualizer.draw_patch_locations(
-                        display_img,
-                        patch_centers_on_img,
-                        patch_display_size_pixels
-                    )
-                
-                time.sleep(0.05)
-                try:
-
-                    visualizer.update_trajectories(
-                    gt_pose=None,
-                    pre_update_buffer=slam.pre_update_poses_for_viz,
-                    post_update_buffer=slam.poses_[:slam.n], # slam.poses points to the updated poses_ buffer
-                    num_valid_poses=slam.n
-                    )
-                    #print(f_i, slam.poses[0][slam.n])
-                    # visualizer.add_pose(pose_gt=slam.poses_[slam.n - 1],pose_est=slam.stabilized_pose)
-                    #visualizer.add_pose(pose_est=slam.poses_[slam.n - 1])
-
-                    # current_est_pose = slam.poses.get(tstamp.item())
-
-                    # # Add the current ground truth and estimated poses to the visualizer
-                    # if current_est_pose is not None:
-                    #     visualizer.add_pose(pose_gt=gt_pose, pose_est=current_est_pose)
-
-                    # Redraw the trajectory plot with the new point
-                    visualizer.plot_trajectory_2d()
-                except:
-                    pass
-
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
 
     
     if t == 0:
@@ -388,7 +380,64 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
 
     poses, tstamps = slam.terminate()
 
+    try:
+        #poses_est = poses.copy()
+        #poses_est[:,:3] = poses_est[:,:3]*5.3
+
+        global g_traj_ref 
+        poses_est = g_traj_ref.positions_xyz
+        poses_est = poses_est - poses_est[0]
+
+
+        poses_imu = torch.cat(slam.imu_poses).numpy()
+        #poses_gt = torch.cat(poses_gt).numpy()
+        covs_imu = torch.stack(slam.imu_covs, dim = 0).numpy()
+
+        plt.figure(figsize=(5, 5))
+        plot_on_ax_3d(plt.axes(), poses_imu, poses_est)
+        plt.title("PyPose IMU Integrator")
+        plt.legend(["PyPose", "Ground Truth"])
+        plt.savefig("figs/3Dpypose_test.png")
+
+        plt.figure(figsize=(5, 5))
+        plot_on_ax_2d(plt.axes(), poses_imu, poses_est, covs_imu)
+        plt.title("PyPose IMU Integrator")
+        plt.legend(["PyPose", "Ground Truth"])
+        plt.savefig("figs/2Dpypose_test.png")
+
+        plt.figure(figsize=(5, 5))
+        plt.plot(np.diff(slam.imu_times))
+        plt.title("PyPose IMU times")
+        plt.savefig("figs/imu_times_test.png")
+    except Exception as e:
+        print("Failed to plot IMU", e)
+        
     return poses, tstamps, img_timestamps
+
+def plot_on_ax_3d(ax, poses_imu, poses):
+    ax = plt.axes(projection='3d')
+    ax.plot3D(poses_imu[:,0], poses_imu[:,1], poses_imu[:,2], 'b')
+    ax.plot3D(poses[:,0], poses[:,2], poses[:,1], 'r')
+
+def plot_on_ax_2d(ax, poses_imu, poses, covs_imu):
+    ax = plt.axes()
+    ax.plot(poses_imu[:,0], poses_imu[:,1], 'b')
+    ax.plot(poses[:,0], poses[:,2], 'r')
+    plot_gaussian(ax, poses_imu[:, 0:2], covs_imu[:, 6:8,6:8])
+
+from matplotlib.patches import Ellipse
+from matplotlib.collections import PatchCollection
+
+def plot_gaussian(ax, means, covs, color=None, sigma=3):
+    ''' Set specific color to show edges, otherwise same with facecolor.'''
+    ellipses = []
+    for i in range(len(means)):
+        eigvals, eigvecs = np.linalg.eig(covs[i])
+        axis = np.sqrt(eigvals) * sigma
+        slope = eigvecs[1][0] / eigvecs[1][1]
+        angle = 180.0 * np.arctan(slope) / np.pi
+        ellipses.append(Ellipse(means[i, 0:2], axis[0], axis[1], angle=angle))
+    ax.add_collection(PatchCollection(ellipses, edgecolors=color, linewidth=1))
 
 def _image_to_cv_fmt(image):
     # Convert image_resized_for_slam (network input) to BGR for display
@@ -410,6 +459,8 @@ def _image_to_cv_fmt(image):
 def async_evaluate_sequence(
     config_VO, net, eval_cfg, data_queue: Queue, traj_ref, use_pose_pred, img_timestamps_all, enable_timing = False, save_slam_steps_path = None
 ):
+    
+
     if use_pose_pred:
         raise NotImplementedError("Removed Pose Prediction as it didn't increase performance enough")
     else:
@@ -423,6 +474,7 @@ def async_evaluate_sequence(
 
     n = len(traj_est)  #cuttoff for testing  
     timestamps = _tstamps if IMU_TESTING else img_timestamps_all[frame_indecies]
+    timestamps = img_timestamps_all[frame_indecies]
     time_traj = timestamps[-1]
 
     print("\nLEN OF EST: ", n,"\n\n")      
@@ -504,7 +556,7 @@ def async_evaluate_sequence(
     plt.title('Trajectory Comparison (XY)')
     plt.legend()
     plt.tight_layout()
-    plt.savefig("figs/traj_compare_mat.png", dpi=300)
+    plt.savefig("figs/traj_compare_mat.png")
     plt.close()
 
 
@@ -586,6 +638,8 @@ def evaluate(
         )
 
         loader_prod_thread.start()
+        global g_traj_ref 
+        g_traj_ref = traj_ref
 
         eval_subtraj = partial(
             async_evaluate_sequence,

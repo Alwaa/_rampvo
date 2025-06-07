@@ -80,6 +80,9 @@ class Visualizer:
             valid_poses = post_update_buffer[:num_valid_poses, :3]
             self.post_update_points = [row.cpu().numpy() for row in valid_poses]
     
+    def overrite_est_traj_(self, curr_traj_est):
+        self.est_points = curr_traj_est[:,:3]
+    
     def add_pose(self, pose_gt=None, pose_est=None):
         """
         Adds new ground truth and/or estimated poses to the trajectory lists.
@@ -97,7 +100,7 @@ class Visualizer:
             # We only need the translation part (the first 3 elements)
             self.est_points.append(pose_est[:3].cpu().numpy().flatten())
 
-    def plot_trajectory_2d(self):
+    def newer_plot_trajectory_2d(self):
         """
         Plots all three trajectories:
         - Ground Truth (Blue)
@@ -139,34 +142,36 @@ class Visualizer:
         cv2.imshow(TAJECTORY_WINDOW, traj_img)
         return traj_img
     
-    def __plot_trajectory_2d(self):
+    def plot_trajectory_2d(self):
         """
         Plots the stored ground truth (blue) and estimated (green) trajectories
         on a white background. It automatically scales the plot to fit the window.
         """
+        X_IDX = 0
+        Y_IDX = 2
         traj_img = np.ones((self.traj_img_height, self.traj_img_width, 3), dtype=np.uint8) * 255
         center_x, center_y = self.traj_img_width // 2, self.traj_img_height // 2
 
 
-        if not self.est_points:
+        if len(self.est_points) == 0:
             cv2.imshow(TAJECTORY_WINDOW, traj_img)
             return traj_img
 
         scale_pints = np.array(self.est_points)
         # Use the max of absolute x and u coordinates for scaling
-        max_coord = np.max(np.abs(scale_pints[:, [0, 1]])) if scale_pints.shape[0] > 0 else 1.0
+        max_coord = np.max(np.abs(scale_pints[:, [X_IDX, Y_IDX]])) if scale_pints.shape[0] > 0 else 1.0
 
         # Calculate scale to fit
         scale = (min(self.traj_img_width, self.traj_img_height) / (2.5 * max_coord)) if max_coord > 0 else 1.0
 
         # --- Draw Ground Truth Trajectory (Blue) ---
         if len(self.gt_points) > 1:
-            gt_screen_pts = np.array([(center_x + p[0] * scale, center_y + p[1] * scale) for p in self.gt_points], dtype=np.int32)
+            gt_screen_pts = np.array([(center_x + p[X_IDX] * scale, center_y + p[Y_IDX] * scale) for p in self.gt_points], dtype=np.int32)
             cv2.polylines(traj_img, [gt_screen_pts], isClosed=False, color=(255, 0, 0), thickness=2)
             
         # --- Draw Estimated Trajectory (Green) ---
         if len(self.est_points) > 1:
-            est_screen_pts = np.array([(center_x + p[0] * scale, center_y + p[1] * scale) for p in self.est_points], dtype=np.int32)
+            est_screen_pts = np.array([(center_x + p[X_IDX] * scale, center_y + p[Y_IDX] * scale) for p in self.est_points], dtype=np.int32)
             cv2.polylines(traj_img, [est_screen_pts], isClosed=False, color=(0, 255, 0), thickness=2)
             # Mark the current estimated position with a red circle
             cv2.circle(traj_img, tuple(est_screen_pts[-1]), 5, (0, 0, 255), -1)

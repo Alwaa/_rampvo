@@ -14,8 +14,7 @@ from .utils import preprocess_input, filter_features
 from . import projective_ops as pops
 from collections import OrderedDict
 
-
-
+import pypose as pp
 
 autocast = torch.amp.autocast("cuda", enabled=True)
 Id = SE3.Identity(1, device="cuda")
@@ -51,10 +50,8 @@ class Ramp_vo:
         self.tlist = []
         self.counter = 0
 
-        # dummy image for visualization
-        self.image_ = torch.zeros(self.ht, self.wd, 3, dtype=torch.uint8, device="cpu")
 
-        self.tstamps_ = torch.zeros(self.N, dtype=torch.long, device="cuda")
+        self.frame_indxs_ = torch.zeros(self.N, dtype=torch.long, device="cuda")
         self.poses_ = torch.zeros(self.N, 7, dtype=torch.float, device="cuda")
         self.patches_ = torch.zeros(
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
@@ -107,6 +104,29 @@ class Ramp_vo:
         self.current_dense_flow_map_feat = None
         self.current_active_patch_coords_feat = None
         self.P_feat = self.network.P  # Patch size in feature map grid
+
+        R_NED_to_ENU = torch.tensor([[0., 1., 0.],
+                             [1., 0., 0.],
+                             [0., 0., -1.]])
+        T_NED_to_ENU = pp.mat2SO3(R_NED_to_ENU)
+
+        q_xyzw = [0.1074549338237731, 0.1516151244003950, 0.9557535343733162, 0.2280586720601046]
+        q_tensor = torch.tensor(q_xyzw)
+        so3_init_cheat = T_NED_to_ENU * pp.SO3(q_tensor)
+
+        cheat_vel_init = T_NED_to_ENU @ torch.tensor([-5.4288209852760119, 3.2772077143020484, -1.6340889856881029])
+        #cheat_vel_init = torch.tensor([0.0, 0.0, 0.0])
+        self.imu_preintegrator = pp.module.IMUPreintegrator(vel=cheat_vel_init,
+                                                            gravity=-9.81,
+                                                            rot=so3_init_cheat)
+        self.dt = torch.tensor([0.0033333333333333], dtype=torch.float32)
+        self.dt = torch.tensor([(3.0 + (1/3))*1e-3 ], dtype=torch.float32)
+
+        self.imu_poses = []
+        self.imu_covs = []
+        self.imu_times = []
+
+        self.all_poses = []
 
     def load_weights(self, network):
         # load network from checkpoint file
@@ -184,22 +204,67 @@ class Ramp_vo:
             # If no frames have been processed, return None.
             return None
 
-    def get_pose(self, t):
-        if t in self.traj:
-            return SE3(self.traj[t])
+    def get_pose(self, i):
+        if i in self.traj:
+            return SE3(self.traj[i])
 
-        t0, dP = self.delta[t]
+        t0, dP = self.delta[i]
         return dP * self.get_pose(t0)
 
     def terminate(self):
         """interpolate missing poses"""
+
         self.traj = {}
         for i in range(self.n):
-            self.traj[self.tstamps_[i].item()] = self.poses_[i]
+            self.traj[self.frame_indxs_[i].item()] = self.poses_[i]
 
-        poses = [self.get_pose(t) for t in range(self.counter)]
+        poses = [self.get_pose(count_i) for count_i in range(self.counter)]
         poses = lietorch.stack(poses, dim=0)
         poses = poses.inv().data.cpu().numpy()
+        tstamps = np.array(self.tlist, dtype=float)
+
+        return poses, tstamps
+    
+
+    def get_current_trajectory(self):
+        """
+        Reconstructs and returns the full estimated trajectory up to the current frame.
+        This is useful for live visualization.
+        """
+        # Can't create a trajectory if no frames have been processed
+        if self.counter == 0:
+            return None, None
+
+        # 1. Create a temporary dictionary of all known poses (active keyframes)
+        # This mirrors the logic in the terminate() function.
+        traj_lookup = {}
+        for i in range(self.n):
+            # The key is the absolute frame counter timestamp, value is the pose
+            traj_lookup[self.frame_indxs_[i].item()] = self.poses_[i]
+
+        # 2. Define a recursive helper function to resolve poses
+        # This is the same as self.get_pose, included here for clarity
+        def _resolve_pose(i):
+            if i in traj_lookup:
+                return SE3(traj_lookup[i])
+            
+            # If the pose is not in the active keyframes, it must be in `self.delta`
+            # which stores the relative pose of a removed keyframe.
+            t0, dP = self.delta[i]
+            # Recursively find the pose of the frame it's relative to and apply the delta.
+            return dP * _resolve_pose(t0)
+
+        # 3. Reconstruct the pose for every frame processed so far
+        poses_list = [_resolve_pose(i) for i in range(self.counter)]
+
+        # 4. Stack, invert (for visualization), and convert to NumPy
+        if not poses_list:
+            return None, None
+            
+        poses = lietorch.stack(poses_list, dim=0)
+        poses = poses.inv().data.cpu().numpy() # .inv() is crucial for correct visualization
+        
+        # 5. Get the corresponding timestamps
         tstamps = np.array(self.tlist, dtype=float)
 
         return poses, tstamps
@@ -288,11 +353,13 @@ class Ramp_vo:
 
         if m / 2 < self.cfg.KEYFRAME_THRESH:
             k = self.n - self.cfg.KEYFRAME_INDEX
-            t0 = self.tstamps_[k - 1].item()
-            t1 = self.tstamps_[k].item()
+            t0 = self.frame_indxs_[k - 1].item()
+            t1 = self.frame_indxs_[k].item()
 
             dP = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()
             self.delta[t1] = (t0, dP)
+
+            #print("\n\nDELTA:", t1, self.curr_timestamp, "\n", k, self.n, "\n")
 
             to_remove = (self.ii == k) | (self.jj == k)
             self.remove_factors(to_remove)
@@ -302,7 +369,7 @@ class Ramp_vo:
             self.jj[self.jj > k] -= 1
 
             for i in range(k, self.n - 1):
-                self.tstamps_[i] = self.tstamps_[i + 1]
+                self.frame_indxs_[i] = self.frame_indxs_[i + 1]
                 self.colors_[i] = self.colors_[i + 1]
                 self.poses_[i] = self.poses_[i + 1]
                 self.patches_[i] = self.patches_[i + 1]
@@ -385,11 +452,11 @@ class Ramp_vo:
         # Store patch-specific flow vectors and confidences
         if delta is not None and delta.ndim == 3 and delta.shape[0] == 1 and delta.shape[2] == 2:
             # delta shape is (1, #edges, 2)
-            self.current_graph_patch_flow_vectors = delta.squeeze(0).clone() # Shape: (#edges, 2)
-            self.current_graph_patch_start_coords = current_patch_centers_feat.squeeze(0).clone() # Shape: (#edges, 2)
+            self.current_graph_patch_flow_vectors = delta.clone().squeeze(0) # Shape: (#edges, 2)
+            self.current_graph_patch_start_coords = current_patch_centers_feat.clone() .squeeze(0)# Shape: (#edges, 2)
 
             if weight is not None and weight.shape == delta.shape:
-                self.current_graph_patch_confidences = weight.squeeze(0).clone() # Shape: (#edges, 2)
+                self.current_graph_patch_confidences = weight.clone().squeeze(0) # Shape: (#edges, 2)
                 # Optionally, convert confidences to uncertainties:
                 # self.current_graph_patch_uncertainties = 1.0 - self.current_graph_patch_confidences
             else:
@@ -432,9 +499,10 @@ class Ramp_vo:
             indexing="ij",
         )
 
-    def __call__(self, tstamp, input_tensor, intrinsics, 
-                 curr_imu_data= None, save_slam_steps_path = None):
+    def __call__(self, frame_indx, input_tensor, intrinsics, 
+                 curr_imu_data= None, timestamp = None, save_slam_steps_path = None):
         """track new frame"""
+        self.curr_timestamp = timestamp
 
         # store intrinsics once
         if self.n == 0:
@@ -443,7 +511,6 @@ class Ramp_vo:
 
         with Timer("SLAM.PreProcess", enabled=self.enable_timing):
             input_ = preprocess_input(input_tensor=input_tensor)
-            events_in, images_in, mask_in = input_ # Just for image for viz mostly
 
         with Timer("SLAM.Patchify", enabled=self.enable_timing):
             with autocast:
@@ -451,7 +518,7 @@ class Ramp_vo:
                     input_=input_,
                     patches_per_image=self.cfg.PATCHES_PER_FRAME,
                     event_bias=self.event_bias,
-                    reinit_hidden=True if tstamp == 0 else False,
+                    reinit_hidden=True if frame_indx == 0 else False,
                 )
             
             if coords_patch_feat is not None:
@@ -459,6 +526,18 @@ class Ramp_vo:
             else:
                 self.current_patch_coords_feat = None
     
+        if curr_imu_data is not None:
+            imu_t, gyro, acc = curr_imu_data
+            #print("\n\n",imu_t[-1], timestamp,"\n")
+            dt = self.dt
+            self.imu_times.extend(imu_t)
+            for gyro_single, acc_single in zip(gyro, acc):
+                
+                imu_state = self.imu_preintegrator(dt=dt, 
+                                                   gyro=torch.tensor(gyro_single, dtype=torch.float32), 
+                                                   acc=torch.tensor(acc_single, dtype=torch.float32))
+                self.imu_poses.append(imu_state['pos'][..., -1, :].cpu())
+                self.imu_covs.append(imu_state['cov'][..., -1, :, :].cpu())
 
         if len(input_) > 2:
             _, _, mask = input_
@@ -469,8 +548,8 @@ class Ramp_vo:
         ### update state attributes ###
 
         with Timer("SLAM.UpdateStateAttr", enabled=self.enable_timing):
-            self.tlist.append(tstamp)
-            self.tstamps_[self.n] = self.counter
+            self.tlist.append(frame_indx)
+            self.frame_indxs_[self.n] = self.counter
             self.intrinsics_[self.n] = intrinsics / self.RES
 
             self.index_[self.n + 1] = self.n + 1
@@ -480,15 +559,8 @@ class Ramp_vo:
             clr = (clr[0, :, [2, 1, 0]] + 0.5) * (255.0 / 2)
             self.colors_[self.n] = clr.to(torch.uint8)
 
-            if self.n > 1:
-                if self.cfg.MOTION_MODEL == "DAMPED_LINEAR":
-                    with Timer(
-                        "SLAM.UpdateStateAttr.DampedLin", enabled=self.enable_timing
-                    ):
-                        P1 = SE3(self.poses_[self.n - 1])
-                        P2 = SE3(self.poses_[self.n - 2])
 
-            if self.n > 1 and (curr_imu_data is None):
+            if self.n > 1:
                 if self.cfg.MOTION_MODEL == 'DAMPED_LINEAR':
                     with Timer("SLAM.UpdateStateAttr.DampedLin", enabled=self.enable_timing):
                         P1 = SE3(self.poses_[self.n-1])
@@ -529,15 +601,6 @@ class Ramp_vo:
                 if self.motion_probe() < 2.0:
                     self.delta[self.counter - 1] = (self.counter - 2, Id[0])
                     return
-            
-        
-        if curr_imu_data is not None:
-            imu_ts, gyro, acc = curr_imu_data
-            self.imu_ts_frames.append(tstamp)
-            self.imu_window_lenghts.append(len(imu_ts))
-            self.imu_ts_buffer.extend(imu_ts.tolist())
-            self.imu_gyro_buffer.extend(gyro.tolist())
-            self.imu_acc_buffer.extend(acc.tolist())
 
 
         # update number of keyframes and number of total patches
@@ -561,7 +624,7 @@ class Ramp_vo:
         elif self.is_initialized:
 
             # snapshot of active poses right before the BA optimization
-            self.pre_update_poses_for_viz = self.poses_[:self.n].clone()
+            #self.pre_update_poses_for_viz = self.poses_[:self.n].clone()
 
             with Timer("SLAM.InitializedUpdate", enabled=self.enable_timing):
                 self.update()
