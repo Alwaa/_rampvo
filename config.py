@@ -12,7 +12,7 @@ QUEUE_ASYNC_MIN_SIZE = 120 #1200
 #Currently test with pose
 IMU_TESTING = True
 #Visualization
-VISUALIZATION = False
+VISUALIZATION = True
 #################################
 
 

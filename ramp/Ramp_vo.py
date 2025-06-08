@@ -21,6 +21,10 @@ Id = SE3.Identity(1, device="cuda")
 
 
 from constans import TARTAN_2_XYZ_P, TARTAN_2_XYZ_Q
+from ramp.ba import BA as pyBA
+
+BundleAdjustment = fastba.BA
+BundleAdjustment = pyBA
 
 class Ramp_vo:
     def __init__(self, cfg, network, train_cfg, ht=480, wd=640, enable_timing=False):
@@ -128,6 +132,9 @@ class Ramp_vo:
         self.imu_times = []
 
         self.all_poses = []
+
+
+        self.imu_preintegrations = {} # Store preintegration between keyframes
 
     def load_weights(self, network):
         # load network from checkpoint file
@@ -425,7 +432,7 @@ class Ramp_vo:
             t0 = max(t0, 1)
 
             try:
-                fastba.BA(
+                BundleAdjustment(
                     self.poses,
                     self.patches,
                     self.intrinsics,
@@ -443,6 +450,7 @@ class Ramp_vo:
                 )
             except Exception as e:
                 print(f"WARNING: BA failed...{e}")
+                raise e
 
         # Old Viz
         self._update_store_old_viz()
@@ -542,6 +550,12 @@ class Ramp_vo:
                                                    acc=_ac)
                 self.imu_poses.append(imu_state['pos'][..., -1, :].cpu())
                 self.imu_covs.append(imu_state['cov'][..., -1, :, :].cpu())
+            
+            # # Store the preintegrated measurement for the new keyframe
+            # if self.n > 0:
+            #     # Might need to reset the preintegrator after each keyframe and get the delta.
+            #     preintegrated_measurement = self.imu_preintegrator.get_delta() 
+            #     self.imu_preintegrations[self.n] = preintegrated_measurement
 
         if len(input_) > 2:
             _, _, mask = input_

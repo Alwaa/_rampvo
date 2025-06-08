@@ -83,6 +83,80 @@ def block_show(A):
     plt.imshow(A[0].detach().cpu().numpy())
     plt.show()
 
+
+def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False, **kwargs):
+    """
+    Wrapper for the Python-based Bundle Adjustment.
+
+    This function matches the interface of the CUDA-based `fastba.BA`. It takes
+    the full history of poses and patches and internally handles the windowing
+    of data from index `t0` to `t1`. It then calls the original BA
+    implementation (`_old_BA`) for the specified number of iterations.
+    """
+    
+    # Run the bundle adjustment for the specified number of iterations
+    for _ in range(iterations):
+        # The BA window is defined by the range [t0, t1)
+        poses_window = poses[:, t0:t1].clone()
+        
+        # Create a boolean mask to find all connections where both poses
+        # are within the active optimization window.
+        mask = (ii >= t0) & (ii < t1) & (jj >= t0) & (jj < t1)
+        
+        # Filter all connection-related tensors using the mask
+        ii_filt = ii[mask]
+        jj_filt = jj[mask]
+        kk_filt = kk[mask]
+        
+        # Apply the mask to the second dimension (the connections dimension)
+        target_filt = target[:, mask]
+        weight_filt = weight[:, mask]
+
+        # Remap the absolute pose indices to be relative to the window start (t0).
+        # The new indices will be in the range [0, t1-t0).
+        ii_rel = ii_filt - t0
+        jj_rel = jj_filt - t0
+        
+        # Find the unique patches that are observed within this window and
+        # remap the patch indices (kk) to be relative to this new subset of patches.
+        unique_kk_filt, kk_rel = torch.unique(kk_filt, return_inverse=True)
+        patches_window = patches[:, unique_kk_filt].clone()
+
+        # Define image boundaries for the visibility check inside _old_BA.
+        # We infer the image width and height from the camera intrinsics (cx, cy),
+        # assuming the principal point is at the image center.
+        # FIX: The intrinsics tensor might be a batch. We handle this by taking
+        # the first element, as image size is constant within a sequence.
+        fx, fy, cx, cy = intrinsics.unbind(dim=-1)
+        ht = (cy.view(-1)[0].item() * 2)
+        wd = (cx.view(-1)[0].item() * 2)
+        bounds_arg = (0, 0, wd, ht)
+
+        # In each window, the first pose is held fixed.
+        fixedp = 1
+        
+        # Call the original BA implementation with the prepared windowed data
+        poses_updated, patches_updated = _old_BA(
+            poses=poses_window,
+            patches=patches_window,
+            intrinsics=intrinsics,
+            targets=target_filt,
+            weights=weight_filt,
+            lmbda=lmbda,
+            ii=ii_rel,
+            jj=jj_rel,
+            kk=kk_rel,
+            bounds=bounds_arg,
+            fixedp=fixedp,
+            **kwargs)
+
+        # Update the original full tensors with the optimized results from the window
+        poses[:, t0:t1] = poses_updated
+        patches[:, unique_kk_filt] = patches_updated
+
+    return poses, patches
+
+
 def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=100.0, PRINT=False, fixedp=1, structure_only=False):
     """ Original Python-based bundle adjustment implementation. """
 
@@ -96,8 +170,7 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
 
 
     # Project patches into image space and compute jacobians
-    coords, v, (Ji, Jj, Jz) = \
-        pops.transform(poses, patches, intrinsics, ii, jj, kk, jacobian=True)
+    coords, v, (Ji, Jj, Jz) = pops.transform(SE3(poses), patches, intrinsics, ii, jj, kk, jacobian=True)
     
     patch_size = coords.shape[3]
     # Compute reprojection error (residual)
@@ -168,9 +241,7 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
 
     w = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk_adj, m)
 
-    # Apply Levenberg-Marquardt damping
-    if isinstance(lmbda, torch.Tensor):
-        lmbda = lmbda.reshape(*C.shape)
+
     Q = 1.0 / (C + lmbda)
     
     # --- Solve the linear system using Schur Complement ---
@@ -200,144 +271,11 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
     if not structure_only and n_adj > 0:
         # Update poses using the computed delta
         update_indices = fixedp + torch.arange(n_adj, device=poses.device)
-        poses = pose_retr(poses, dX, update_indices)
-
-    return poses, patches
-
-def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False, **kwargs):
-    """
-    Wrapper for the Python-based Bundle Adjustment.
-
-    This function matches the interface of the CUDA-based `fastba.BA`. It takes
-    the full history of poses and patches and internally handles the windowing
-    of data from index `t0` to `t1`. It then calls the original BA
-    implementation (`_old_BA`) for the specified number of iterations.
-    """
+        poses = pose_retr(SE3(poses), dX, update_indices)
     
-    # Run the bundle adjustment for the specified number of iterations
-    for _ in range(iterations):
-        # The BA window is defined by the range [t0, t1)
-        poses_window = poses[:, t0:t1].clone()
-        
-        # Create a boolean mask to find all connections where both poses
-        # are within the active optimization window.
-        mask = (ii >= t0) & (ii < t1) & (jj >= t0) & (jj < t1)
-        
-        # Filter all connection-related tensors using the mask
-        ii_filt = ii[mask]
-        jj_filt = jj[mask]
-        kk_filt = kk[mask]
-        
-        # Apply the mask to the second dimension (the connections dimension)
-        target_filt = target[:, mask]
-        weight_filt = weight[:, mask]
-
-        # Remap the absolute pose indices to be relative to the window start (t0).
-        # The new indices will be in the range [0, t1-t0).
-        ii_rel = ii_filt - t0
-        jj_rel = jj_filt - t0
-        
-        # Find the unique patches that are observed within this window and
-        # remap the patch indices (kk) to be relative to this new subset of patches.
-        unique_kk_filt, kk_rel = torch.unique(kk_filt, return_inverse=True)
-        patches_window = patches[:, unique_kk_filt].clone()
-
-        # Define image boundaries for the visibility check inside _old_BA.
-        # We infer the image width and height from the camera intrinsics (cx, cy),
-        # assuming the principal point is at the image center.
-        fx, fy, cx, cy = intrinsics.unbind(dim=-1)
-        ht = (cy.item() * 2)
-        wd = (cx.item() * 2)
-        bounds_arg = (0, 0, wd, ht)
-
-        # In each window, the first pose is held fixed.
-        fixedp = 1
-        
-        # Call the original BA implementation with the prepared windowed data
-        poses_updated, patches_updated = _old_BA(
-            poses=poses_window,
-            patches=patches_window,
-            intrinsics=intrinsics,
-            targets=target_filt,
-            weights=weight_filt,
-            lmbda=lmbda,
-            ii=ii_rel,
-            jj=jj_rel,
-            kk=kk_rel,
-            bounds=bounds_arg,
-            fixedp=fixedp,
-            **kwargs)
-
-        # Update the original full tensors with the optimized results from the window
-        poses[:, t0:t1] = poses_updated
-        patches[:, unique_kk_filt] = patches_updated
+    # To rectify before returning to new ramp vo
+    if isinstance(poses, SE3):
+        poses = poses.data
 
     return poses, patches
 
-def __dim_BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False, **kwargs):
-    """
-    Wrapper for the Python-based Bundle Adjustment.
-
-    This function matches the interface of the CUDA-based `fastba.BA`. It takes
-    the full history of poses and patches and internally handles the windowing
-    of data from index `t0` to `t1`. It then calls the original BA
-    implementation (`_old_BA`) for the specified number of iterations.
-    """
-    
-    # Run the bundle adjustment for the specified number of iterations
-    for _ in range(iterations):
-        # The BA window is defined by the range [t0, t1)
-        poses_window = poses[:, t0:t1].clone()
-        
-        # Create a boolean mask to find all connections where both poses
-        # are within the active optimization window.
-        mask = (ii >= t0) & (ii < t1) & (jj >= t0) & (jj < t1)
-        
-        # Filter all connection-related tensors using the mask
-        ii_filt = ii[mask]
-        jj_filt = jj[mask]
-        kk_filt = kk[mask]
-        target_filt = target[mask]
-        weight_filt = weight[mask]
-
-        # Remap the absolute pose indices to be relative to the window start (t0).
-        # The new indices will be in the range [0, t1-t0).
-        ii_rel = ii_filt - t0
-        jj_rel = jj_filt - t0
-        
-        # Find the unique patches that are observed within this window and
-        # remap the patch indices (kk) to be relative to this new subset of patches.
-        unique_kk_filt, kk_rel = torch.unique(kk_filt, return_inverse=True)
-        patches_window = patches[:, unique_kk_filt].clone()
-
-        # Define image boundaries for the visibility check inside _old_BA.
-        # We infer the image width and height from the camera intrinsics (cx, cy),
-        # assuming the principal point is at the image center.
-        fx, fy, cx, cy = intrinsics.unbind(dim=-1)
-        ht = (cy.item() * 2)
-        wd = (cx.item() * 2)
-        bounds_arg = (0, 0, wd, ht)
-
-        # In each window, the first pose is held fixed.
-        fixedp = 1
-        
-        # Call the original BA implementation with the prepared windowed data
-        poses_updated, patches_updated = old_BA(
-            poses=poses_window,
-            patches=patches_window,
-            intrinsics=intrinsics,
-            targets=target_filt,
-            weights=weight_filt,
-            lmbda=lmbda,
-            ii=ii_rel,
-            jj=jj_rel,
-            kk=kk_rel,
-            bounds=bounds_arg,
-            fixedp=fixedp,
-            **kwargs)
-
-        # Update the original full tensors with the optimized results from the window
-        poses[:, t0:t1] = poses_updated
-        patches[:, unique_kk_filt] = patches_updated
-
-    return poses, patches
