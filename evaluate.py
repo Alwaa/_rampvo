@@ -66,11 +66,14 @@ from config import (
     QUEUE_ASYNC_SLEEP_BETWEEN_STARTUP_CHECKS, 
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM,
     IMU_TESTING,
-    TARTAN_PATH_PREFIX
+    TARTAN_PATH_PREFIX,
+    VISUALIZATION,
 )
 
 seed_everything(seed=1234)
 sys.setrecursionlimit(100000)
+
+from constans import TARTAN_2_XYZQ4, TARTAN_2_XYZW3
 
 
 # TODO: Investigate 'standard_pose_format' variable that was unused, but set for EDS and SteroDavis
@@ -124,40 +127,23 @@ def async_data_loader_all_events(
     # idx t wx wy wz ax ay az
     imu_data = np.loadtxt(osp.join(full_scene, "imu" + suffix + ".txt"), dtype=np.float64)
     # t vx vy vz
-    vel_data = np.loadtxt(osp.join(full_scene, "velocities" + suffix + ".txt"), dtype=np.float64)
-    # t tx ty tz qx qy qz qw
-    pose_data = np.loadtxt(osp.join(full_scene, "stamped_groundtruth" + suffix + ".txt"), dtype=np.float64)
-    assert vel_data.shape[0] == pose_data.shape[0]
+    # vel_data = np.loadtxt(osp.join(full_scene, "velocities" + suffix + ".txt"), dtype=np.float64)
 
 
     imu_t_s = imu_data[:, 1] #seconds
     imu_t_ns = imu_t_s * 1e9 # Convert to NANOSECONDS
-    imu_gyro     = imu_data[:, 2:5]
-    imu_accel    = imu_data[:, 5:8]
+
+    imu_measurements_raw = imu_data[:, 2:8]
+    imu_measurements = imu_measurements_raw[:, TARTAN_2_XYZW3]
+
+    imu_gyro     = imu_measurements[:, 0:3]
+    imu_accel    = imu_measurements[:, 3:6]
     def imu_slice(start_t_ns, end_t_ns):
         _i0 = np.searchsorted(imu_t_ns, start_t_ns, side="left")
         _i1 = np.searchsorted(imu_t_ns, end_t_ns,   side="right")
         return imu_t_ns[_i0:_i1], imu_gyro[_i0:_i1], imu_accel[_i0:_i1]
     
- 
-    # ---------------------------------------------
-    pose_t = pose_data[:, 0]
-    poses_raw = pose_data[:, 1:]
-    poses_raw = torch.as_tensor(poses_raw, dtype=torch.float32, device='cpu').contiguous()
-    P_all = SE3(poses_raw)
-    P0_inv   = P_all[0:1].inv()  
-    P_rel: SE3 = P0_inv * P_all
-
-    poses_rel = P_rel.data.detach().cpu().numpy()  
-    def pose_slice(start_t, end_t):
-        _i0 = np.searchsorted(pose_t, start_t, side="left")
-        _i1 = np.searchsorted(pose_t, end_t,   side="right")
-        return poses_rel[_i0:_i1, :]
     
-    def pose_last(start_t, end_t):
-        _i1 = np.searchsorted(pose_t, end_t,   side="right")
-
-    # ---------------------------------------------            
 
     # skip first element (no events for it)
     image_files = imfiles[1 :: downsample_fact]
@@ -334,7 +320,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         else:
             continue
             
-        if slam.current_patch_coords_feat is not None:
+        if slam.current_patch_coords_feat is not None and VISUALIZATION:
             # Coords are in feature map scale (H/RES, W/RES) of image_resized_for_slam
             patch_centers_on_img = slam.current_patch_coords_feat.cpu().numpy() * slam.RES
             patch_display_size_pixels = slam.P_feat * slam.RES
@@ -409,6 +395,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         plt.plot(np.diff(slam.imu_times))
         plt.title("PyPose IMU times")
         plt.savefig("figs/imu_times_test.png")
+        print("\nIMU TIME CHECK: ",np.sum(np.diff(slam.imu_times)), "---", slam.imu_times[-1],"\n")
     except Exception as e:
         print("Failed to plot IMU", e)
         
@@ -417,12 +404,12 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
 def plot_on_ax_3d(ax, poses_imu, poses):
     ax = plt.axes(projection='3d')
     ax.plot3D(poses_imu[:,0], poses_imu[:,1], poses_imu[:,2], 'b')
-    ax.plot3D(poses[:,0], poses[:,2], poses[:,1], 'r')
+    ax.plot3D(poses[:,0], poses[:,1], poses[:,2], 'r')
 
 def plot_on_ax_2d(ax, poses_imu, poses, covs_imu):
     ax = plt.axes()
     ax.plot(poses_imu[:,0], poses_imu[:,1], 'b')
-    ax.plot(poses[:,0], poses[:,2], 'r')
+    ax.plot(poses[:,0], poses[:,1], 'r')
     plot_gaussian(ax, poses_imu[:, 0:2], covs_imu[:, 6:8,6:8])
 
 from matplotlib.patches import Ellipse

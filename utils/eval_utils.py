@@ -134,9 +134,10 @@ def read_stereodavis_format_poses(traj_path, timestamps_path):
     traj_ref = PoseTrajectory3D(xyz, quat, timestamps)
     return traj_ref
 
+from constans import TARTAN_2_XYZQ4
+
 def read_tartan_format_poses(traj_path, timestamps_path):
-    NED_TO_XYZ_PERM = [1, 2, 0, 4, 5, 3, 6] 
-    traj = np.loadtxt(traj_path, delimiter=" ")[1:, NED_TO_XYZ_PERM]
+    traj = np.loadtxt(traj_path, delimiter=" ")[1:, TARTAN_2_XYZQ4]
 
     stamps = np.loadtxt(timestamps_path) # n x 1
     xyz = traj[:, 0:3]  # n x 3
@@ -146,8 +147,7 @@ def read_tartan_format_poses(traj_path, timestamps_path):
     return traj_ref
 
 def read_moonlanding_format_poses(traj_path, timestamps_path):
-    NED_TO_XYZ_PERM = [1, 2, 0, 4, 5, 3, 6] 
-    traj = np.loadtxt(traj_path, delimiter=" ")[1:, NED_TO_XYZ_PERM]
+    traj = np.loadtxt(traj_path, delimiter=" ")[1:, TARTAN_2_XYZQ4]
     stamps = np.loadtxt(timestamps_path) # n x 1
     xyz = traj[:, 0:3]  # n x 3
     quat = traj[:, 3:]  # n x 4

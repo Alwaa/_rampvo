@@ -20,6 +20,8 @@ autocast = torch.amp.autocast("cuda", enabled=True)
 Id = SE3.Identity(1, device="cuda")
 
 
+from constans import TARTAN_2_XYZ_P, TARTAN_2_XYZ_Q
+
 class Ramp_vo:
     def __init__(self, cfg, network, train_cfg, ht=480, wd=640, enable_timing=False):
         self.cfg = cfg
@@ -105,20 +107,19 @@ class Ramp_vo:
         self.current_active_patch_coords_feat = None
         self.P_feat = self.network.P  # Patch size in feature map grid
 
-        R_NED_to_ENU = torch.tensor([[0., 1., 0.],
-                             [1., 0., 0.],
-                             [0., 0., -1.]])
-        T_NED_to_ENU = pp.mat2SO3(R_NED_to_ENU)
 
-        q_xyzw = [0.1074549338237731, 0.1516151244003950, 0.9557535343733162, 0.2280586720601046]
-        q_tensor = torch.tensor(q_xyzw)
-        so3_init_cheat = T_NED_to_ENU * pp.SO3(q_tensor)
+        q_xyzw_tartan = [0.1074549338237731, 0.1516151244003950, 0.9557535343733162, 0.2280586720601046]
+        q_tensor = torch.tensor(q_xyzw_tartan)
+        v_init_tartan = torch.tensor([-5.4288209852760119, 3.2772077143020484, -1.6340889856881029])
 
-        cheat_vel_init = T_NED_to_ENU @ torch.tensor([-5.4288209852760119, 3.2772077143020484, -1.6340889856881029])
+        so3_init_cheat = pp.SO3(q_tensor[TARTAN_2_XYZ_Q])
+        cheat_vel_init =  v_init_tartan[TARTAN_2_XYZ_P]
+
         #cheat_vel_init = torch.tensor([0.0, 0.0, 0.0])
         self.imu_preintegrator = pp.module.IMUPreintegrator(vel=cheat_vel_init,
-                                                            gravity=-9.81,
+                                                            #gravity=0.0,
                                                             rot=so3_init_cheat)
+        
         self.dt = torch.tensor([0.0033333333333333], dtype=torch.float32)
         self.dt = torch.tensor([(3.0 + (1/3))*1e-3 ], dtype=torch.float32)
 
@@ -532,10 +533,13 @@ class Ramp_vo:
             dt = self.dt
             self.imu_times.extend(imu_t)
             for gyro_single, acc_single in zip(gyro, acc):
-                
+
+                _gy = torch.tensor(gyro_single, dtype=torch.float32)
+                _ac = torch.tensor(acc_single, dtype=torch.float32)
+
                 imu_state = self.imu_preintegrator(dt=dt, 
-                                                   gyro=torch.tensor(gyro_single, dtype=torch.float32), 
-                                                   acc=torch.tensor(acc_single, dtype=torch.float32))
+                                                   gyro=_gy, 
+                                                   acc=_ac)
                 self.imu_poses.append(imu_state['pos'][..., -1, :].cpu())
                 self.imu_covs.append(imu_state['cov'][..., -1, :, :].cpu())
 

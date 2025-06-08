@@ -11,6 +11,8 @@ QUEUE_BUFFER_SIZE = 2400
 QUEUE_ASYNC_MIN_SIZE = 120 #1200 
 #Currently test with pose
 IMU_TESTING = True
+#Visualization
+VISUALIZATION = False
 #################################
 
 
@@ -22,6 +24,8 @@ if RAMPVO_ENV == "server":
 
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 2
     TARTAN_PATH_PREFIX = "/data/storage"
+
+    VISUALIZATION = False #Override visualization to OFF on server
 else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 1

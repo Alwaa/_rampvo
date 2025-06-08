@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 import glob
 
+from constans import TARTAN_2_XYZQ4
 
 class TartanEvent(RGBDDataset):
     DEPTH_SCALE = 5.0  # scale depths to balance rot & trans
@@ -137,7 +138,7 @@ class TartanEvent(RGBDDataset):
                 continue
 
             poses = np.loadtxt(osp.join(scene, "pose_left.txt"), delimiter=" ")
-            poses = poses[:, [1, 2, 0, 4, 5, 3, 6]]
+            poses = poses[:, TARTAN_2_XYZQ4]
             poses[:, :3] /= self.DEPTH_SCALE
             intrinsics = [TartanEvent.calib_read()] * len(images)
 
