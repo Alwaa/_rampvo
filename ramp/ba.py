@@ -77,7 +77,6 @@ def block_solve(A, B, ep=1.0, lm=1e-4):
     b, n_blocks, m_blocks, p, q = A.shape
     A_flat = A.permute(0, 1, 3, 2, 4).reshape(b, n_blocks * p, m_blocks * q)
 
-    # FIX: B is a vector and should be reshaped into a column vector, not permuted like a matrix.
     # Its shape is (b, n_blocks, 1, p, 1), so we reshape it to (b, n_blocks * p, 1).
     B_flat = B.reshape(b, n_blocks * p, 1)
 
