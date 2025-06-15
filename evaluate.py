@@ -385,7 +385,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         covs_imu = torch.stack(slam.test_imu_covs, dim = 0).numpy()
 
         plot_2d_3d_comps([(poses_imu, covs_imu), (poses_delta_int, None), (poses_delta_key, None)], 
-                         ["PyPose", "Deltas Preint.", "Deltas Refactored"])
+                         ["PyPose", "Deltas Preint.", "Deltas KeyFrames"])
 
         # plt.figure(figsize=(5, 5))
         # plt.plot(np.diff(slam.test_imu_times))
@@ -400,7 +400,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     return poses, tstamps, img_timestamps
 
 def plot_2d_3d_comps(poses_cov, labels):
-    save_folder = "figs/Try/"
+    save_folder = "figs/Debug/"
     os.makedirs(save_folder, exist_ok=True)
     colors = ["g", "r", "b-.", "y--"]
     assert len(poses_cov) == len(labels), "Not matching label and traj/pose lists"
@@ -435,8 +435,8 @@ def plot_gaussian(ax, means, covs, color=None, sigma=3):
         axis = np.sqrt(eigvals) * sigma
         slope = eigvecs[1][0] / eigvecs[1][1]
         angle = 180.0 * np.arctan(slope) / np.pi
-        ellipses.append(Ellipse(means[i, 0:2], axis[0], axis[1], angle=angle, color=color, alpha=0.1))
-    ax.add_collection(PatchCollection(ellipses, edgecolors=color, alpha= 0.02, linewidth=1))
+        ellipses.append(Ellipse(means[i, 0:2], axis[0], axis[1], angle=angle))
+    ax.add_collection(PatchCollection(ellipses, edgecolors=color, color=color, alpha= 0.005, linewidth=1))
 
 def _image_to_cv_fmt(image):
     # Convert image_resized_for_slam (network input) to BGR for display

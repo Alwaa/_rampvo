@@ -26,15 +26,23 @@ from ramp.ba import BA as pyBA
 #BundleAdjustment = fastba.BA
 BundleAdjustment = pyBA
 
-GRAVITY = torch.tensor([0, 0, -9.81])
+GRAVITY_BASE = torch.tensor([0, 0, -9.81])
+
+def IMU_prop(current_dict, delta_dict, GRAVITY=GRAVITY_BASE):
+    new_dict = {}
+    new_dict["p"] = current_dict["p"] + current_dict["v"] * delta_dict["Dt"] + 0.5 * GRAVITY * delta_dict["Dt"]**2 + current_dict["R"] * delta_dict["Dp"]
+    new_dict["v"] = current_dict["v"] + GRAVITY * delta_dict["Dt"] + current_dict["R"] * delta_dict["Dv"]
+    new_dict["R"] = current_dict["R"] * delta_dict["Dr"]
+
+    return new_dict
 
 def commbine_deltas(delta_0: dict, delta_1: dict) -> dict:
     """ Combine Deltas from (0->1) and (1->2) to get (0->2) """
     comb_delta = {}
-
-    R_01 = pp.SO3(delta_0['Dr'])
-    R_12 = pp.SO3(delta_1['Dr'])
-    R_02 = R_01 * R_12  # Composition of SO3 objects
+   
+    R_01 = delta_0['Dr']
+    R_12 = delta_1['Dr']
+    R_02 =  R_01 * R_12
 
     dt_02 = delta_0['Dt'] + delta_1['Dt']
     dv_02 = delta_0['Dv'] + R_01 * delta_1['Dv']
@@ -152,9 +160,6 @@ class Ramp_vo:
             gravity=0.0
         ) #.to(device)
 
-        self.current_p_pred = torch.zeros(3)
-        self.current_v_pred = cheat_vel_init.clone()
-        self.current_R_pred = so3_init_cheat.clone()
         self.currect_pred_dict = {"p": torch.zeros(3),
                                   "v": cheat_vel_init.clone(),
                                   "R": so3_init_cheat.clone()}
@@ -180,15 +185,25 @@ class Ramp_vo:
         delta_r = init_delta_dict["Dr"].clone()[...,-1,:]
         delta_t = init_delta_dict["Dt"].clone()[...,-1,:]
         
-        self.imu_deltas_start_buffer = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+        self.imu_deltas_buffer = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
         self.imu_deltas[0] = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+
+        self.imu_deltas_zero = {"p": torch.zeros(3),
+                                  "v": cheat_vel_init.clone(),
+                                  "R": so3_init_cheat.clone()}
+
         print("Startbuffer:")
-        print(self.imu_deltas_start_buffer, "\n")
+        print(self.imu_deltas_buffer, "\n")
 
         self.all_poses = []
 
+        self.all_deltas = []
+
 
         self.imu_preintegrations = {} # Store preintegration between keyframes
+
+        self.straight_deltas_t_cum = 0
+        self.key_added_t = 0
 
     def load_weights(self, network):
         # load network from checkpoint file
@@ -280,10 +295,43 @@ class Ramp_vo:
         for i in range(self.n):
             self.traj[self.frame_indxs_[i].item()] = self.poses_[i]
 
+        print("\nNN\n", self.n, len(self.imu_deltas), "\n\n")
+        prev_state = self.imu_deltas_zero
+        t = 0
+        GRAVITY_2 = torch.tensor([0, 0, 0]) # TESTING
+        for i in range(0, self.n):
+            t += self.imu_deltas[i]["Dt"]
+            prev_state = IMU_prop(prev_state, self.imu_deltas[i]) #, GRAVITY=GRAVITY_2
+            self.key_delta_poses.append(prev_state["p"].clone())
+        
+
         poses = [self.get_pose(count_i) for count_i in range(self.counter)]
         poses = lietorch.stack(poses, dim=0)
         poses = poses.inv().data.cpu().numpy()
         tstamps = np.array(self.tlist, dtype=float)
+
+        print(self.straight_deltas_t_cum, t, self.curr_timestamp)
+        print("\n\nLEN OF DELTAS:\n", len(self.all_deltas))
+        deltas_to_marginalize = [100]*100 + [300]*300 #+ list(range(500,850))
+        for di in deltas_to_marginalize:
+            self.all_deltas[di - 1] = commbine_deltas(self.all_deltas[di - 1],self.all_deltas[di])
+
+            for _i in range(di, len(self.all_deltas)-1):
+                self.all_deltas[_i] = self.all_deltas[_i +1 ]
+            self.all_deltas = self.all_deltas[:-1]
+        
+
+        print("\n\nNEW LEN OF DELTAS:\n", len(self.all_deltas))
+
+        _state = self.imu_deltas_zero
+        _delta_running = self.imu_deltas[0]
+        self.key_delta_poses = []
+        for new_delta in self.all_deltas:
+            # _state = IMU_prop(_state, new_delta)
+            # self.key_delta_poses.append(_state["p"])
+
+            _delta_running = commbine_deltas(_delta_running, new_delta)
+            self.key_delta_poses.append(IMU_prop(self.imu_deltas_zero, _delta_running)["p"])
 
         return poses, tstamps
     
@@ -422,6 +470,8 @@ class Ramp_vo:
             self.pose_delta[t1] = (t0, dP)
 
             #print("\n\nDELTA:", t1, self.curr_timestamp, "\n", k, self.n, "\n")
+            self.imu_deltas[k-1] = commbine_deltas(self.imu_deltas[k-1], self.imu_deltas[k]) #TODO: Check off by one
+            # print("\n\n",max(self.imu_deltas.keys()), self.n, k, "\n\n")
 
             to_remove = (self.ii == k) | (self.jj == k)
             self.remove_factors(to_remove)
@@ -431,6 +481,8 @@ class Ramp_vo:
             self.jj[self.jj > k] -= 1
 
             for i in range(k, self.n - 1):
+                self.imu_deltas[i] = self.imu_deltas[i + 1]
+
                 self.frame_indxs_[i] = self.frame_indxs_[i + 1]
                 self.colors_[i] = self.colors_[i + 1]
                 self.poses_[i] = self.poses_[i + 1]
@@ -441,6 +493,8 @@ class Ramp_vo:
                 self.gmap_[i % self.mem] = self.gmap_[(i + 1) % self.mem]
                 self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
                 self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
+            
+            self.imu_deltas[self.n] = None
 
             self.n -= 1
             self.m -= self.M
@@ -626,45 +680,31 @@ class Ramp_vo:
             delta_t = out_dict["Dt"].clone()[...,-1,:]
 
             frame_delta = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+            self.straight_deltas_t_cum += delta_t
 
-            if self.n > 1:
-                self.imu_deltas[self.n] = frame_delta
-            elif self.n == 1:
-                self.imu_deltas[self.n] = commbine_deltas(self.imu_deltas_start_buffer, frame_delta)
-            else:
-                self.imu_deltas_start_buffer = commbine_deltas(self.imu_deltas_start_buffer, frame_delta)
 
+            test = commbine_deltas(self.imu_deltas[0], frame_delta)
             
-            def IMU_prop(current_dict, delta_dict):
-                new_dict = {}
-                new_dict["p"] = current_dict["p"] + current_dict["v"] * delta_dict["Dt"] + 0.5 * GRAVITY * delta_dict["Dt"]**2 + current_dict["R"] * delta_dict["Dp"]
-                new_dict["v"] = current_dict["v"] + GRAVITY * delta_dict["Dt"] + current_dict["R"] * delta_dict["Dv"]
-                new_dict["R"] = current_dict["R"] * delta_dict["Dr"]
-
-                return new_dict
-            
-            self.currect_pred_dict = IMU_prop(self.currect_pred_dict, frame_delta)
-            self.key_delta_poses.append(self.currect_pred_dict["p"].clone())
-
-
-            p_new_pred = self.current_p_pred + self.current_v_pred * delta_t + 0.5 * GRAVITY * delta_t**2 + self.current_R_pred * delta_p
-            v_new_pred = self.current_v_pred + GRAVITY * delta_t + self.current_R_pred * delta_v
-            R_new_pred = self.current_R_pred * delta_r
-
-            self.delta_poses.append(p_new_pred)
+            self.currect_pred_dict = IMU_prop(self.currect_pred_dict, test)
+            self.delta_poses.append(self.currect_pred_dict["p"].clone())
             self.delta_covs.append(torch.ones((9,9), dtype=torch.float32)*1e-1)
 
-            self.current_p_pred = p_new_pred
-            self.current_v_pred = v_new_pred
-            self.current_R_pred = R_new_pred
-
+            self.imu_deltas_buffer = commbine_deltas(self.imu_deltas_buffer, frame_delta)
+            self.all_deltas.append(frame_delta)
 
 
         if len(input_) > 2:
             _, _, mask = input_
             if not mask and mask is not None:
                 # if only events only update the super state but not the VO
+                
+                # print("\n\n\n   D:   \n", self.imu_deltas_buffer,"\n", frame_delta, "\n\n")
+
                 return
+        
+        # print("\n", 20*"-", "\n")      
+        # print(self.imu_deltas_buffer,"\n", frame_delta)
+        # print("\n", 20*"-", "\n")
 
         ### update state attributes ###
 
@@ -720,7 +760,9 @@ class Ramp_vo:
             self.counter += 1
             if self.n > 0 and not self.is_initialized:
                 if self.motion_probe() < 2.0:
+
                     self.pose_delta[self.counter - 1] = (self.counter - 2, Id[0])
+
                     return
 
 
@@ -733,11 +775,18 @@ class Ramp_vo:
             self.append_factors(*self.__edges_forw())
             self.append_factors(*self.__edges_back())
 
+        self.imu_deltas[self.n] = self.imu_deltas_buffer
+        self.imu_deltas_buffer = self.imu_deltas[0]
+        self.key_added_t += self.imu_deltas[self.n]["Dt"]
 
         # initialize with 8 valid frames and do 12 slam updates
         if self.n == 8 and not self.is_initialized:
             with Timer("SLAM.NotInitializedUpdate", enabled=self.enable_timing):
                 self.is_initialized = True
+
+                print("\n\nMMMMM\n\n")
+                print(self.imu_deltas_buffer)
+                print("\n\nMMMMM\n\n")
 
                 for itr in range(12):
                     self.update()
