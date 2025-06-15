@@ -28,6 +28,27 @@ BundleAdjustment = pyBA
 
 GRAVITY = torch.tensor([0, 0, -9.81])
 
+def commbine_deltas(delta_0: dict, delta_1: dict) -> dict:
+    """ Combine Deltas from (0->1) and (1->2) to get (0->2) """
+    comb_delta = {}
+
+    R_01 = pp.SO3(delta_0['Dr'])
+    R_12 = pp.SO3(delta_1['Dr'])
+    R_02 = R_01 * R_12  # Composition of SO3 objects
+
+    dt_02 = delta_0['Dt'] + delta_1['Dt']
+    dv_02 = delta_0['Dv'] + R_01 * delta_1['Dv']
+    dp_02 = delta_0['Dp'] + delta_0['Dv'] * delta_1['Dt'] + R_01 * delta_1['Dp']
+
+    comb_delta["Dr"] = R_02
+    comb_delta["Dt"] = dt_02
+    comb_delta["Dv"] = dv_02
+    comb_delta["Dp"] = dp_02
+
+    return comb_delta
+
+
+
 class Ramp_vo:
     def __init__(self, cfg, network, train_cfg, ht=480, wd=640, enable_timing=False):
         self.cfg = cfg
@@ -102,7 +123,7 @@ class Ramp_vo:
         self.poses_[:,6] = 1.0
 
         # store relative poses for removed frames
-        self.delta = {}
+        self.pose_delta = {}
 
 
         # For Viz        
@@ -134,6 +155,9 @@ class Ramp_vo:
         self.current_p_pred = torch.zeros(3)
         self.current_v_pred = cheat_vel_init.clone()
         self.current_R_pred = so3_init_cheat.clone()
+        self.currect_pred_dict = {"p": torch.zeros(3),
+                                  "v": cheat_vel_init.clone(),
+                                  "R": so3_init_cheat.clone()}
 
         
         self.dt = torch.tensor([0.0033333333333333], dtype=torch.float32)
@@ -145,6 +169,21 @@ class Ramp_vo:
 
         self.delta_poses = []
         self.delta_covs = []
+
+        self.key_delta_poses = []
+
+        self.imu_deltas = {} #Dict for now while prototyping
+
+        init_delta_dict = self.integrator.integrate(torch.zeros((1,1,1)), torch.zeros((1,1,3)),torch.zeros((1,1,3)))
+        delta_p = init_delta_dict["Dp"].clone()[...,-1,:]
+        delta_v = init_delta_dict["Dv"].clone()[...,-1,:]
+        delta_r = init_delta_dict["Dr"].clone()[...,-1,:]
+        delta_t = init_delta_dict["Dt"].clone()[...,-1,:]
+        
+        self.imu_deltas_start_buffer = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+        self.imu_deltas[0] = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+        print("Startbuffer:")
+        print(self.imu_deltas_start_buffer, "\n")
 
         self.all_poses = []
 
@@ -231,7 +270,7 @@ class Ramp_vo:
         if i in self.traj:
             return SE3(self.traj[i])
 
-        t0, dP = self.delta[i]
+        t0, dP = self.pose_delta[i]
         return dP * self.get_pose(t0)
 
     def terminate(self):
@@ -273,7 +312,7 @@ class Ramp_vo:
             
             # If the pose is not in the active keyframes, it must be in `self.delta`
             # which stores the relative pose of a removed keyframe.
-            t0, dP = self.delta[i]
+            t0, dP = self.pose_delta[i]
             # Recursively find the pose of the frame it's relative to and apply the delta.
             return dP * _resolve_pose(t0)
 
@@ -380,7 +419,7 @@ class Ramp_vo:
             t1 = self.frame_indxs_[k].item()
 
             dP = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()
-            self.delta[t1] = (t0, dP)
+            self.pose_delta[t1] = (t0, dP)
 
             #print("\n\nDELTA:", t1, self.curr_timestamp, "\n", k, self.n, "\n")
 
@@ -585,7 +624,27 @@ class Ramp_vo:
             delta_v = out_dict["Dv"].clone()[...,-1,:]
             delta_r = out_dict["Dr"].clone()[...,-1,:]
             delta_t = out_dict["Dt"].clone()[...,-1,:]
+
+            frame_delta = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+
+            if self.n > 1:
+                self.imu_deltas[self.n] = frame_delta
+            elif self.n == 1:
+                self.imu_deltas[self.n] = commbine_deltas(self.imu_deltas_start_buffer, frame_delta)
+            else:
+                self.imu_deltas_start_buffer = commbine_deltas(self.imu_deltas_start_buffer, frame_delta)
+
             
+            def IMU_prop(current_dict, delta_dict):
+                new_dict = {}
+                new_dict["p"] = current_dict["p"] + current_dict["v"] * delta_dict["Dt"] + 0.5 * GRAVITY * delta_dict["Dt"]**2 + current_dict["R"] * delta_dict["Dp"]
+                new_dict["v"] = current_dict["v"] + GRAVITY * delta_dict["Dt"] + current_dict["R"] * delta_dict["Dv"]
+                new_dict["R"] = current_dict["R"] * delta_dict["Dr"]
+
+                return new_dict
+            
+            self.currect_pred_dict = IMU_prop(self.currect_pred_dict, frame_delta)
+            self.key_delta_poses.append(self.currect_pred_dict["p"].clone())
 
 
             p_new_pred = self.current_p_pred + self.current_v_pred * delta_t + 0.5 * GRAVITY * delta_t**2 + self.current_R_pred * delta_p
@@ -661,7 +720,7 @@ class Ramp_vo:
             self.counter += 1
             if self.n > 0 and not self.is_initialized:
                 if self.motion_probe() < 2.0:
-                    self.delta[self.counter - 1] = (self.counter - 2, Id[0])
+                    self.pose_delta[self.counter - 1] = (self.counter - 2, Id[0])
                     return
 
 
