@@ -370,31 +370,19 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         #poses_est = poses.copy()
         #poses_est[:,:3] = poses_est[:,:3]*5.3
 
-        global g_traj_ref 
-        poses_est = g_traj_ref.positions_xyz
-        poses_est = poses_est - poses_est[0]
-
         print(slam.delta_poses[:3])
         print(slam.test_imu_poses[:3])
 
-        poses_est = torch.cat(slam.delta_poses).numpy()
+        global g_traj_ref 
+        poses_gt = g_traj_ref.positions_xyz
+        poses_gt = poses_gt - poses_gt[0]
 
+        poses_delta_int = torch.cat(slam.delta_poses).numpy()
 
         poses_imu = torch.cat(slam.test_imu_poses).numpy()
-        #poses_gt = torch.cat(poses_gt).numpy()
         covs_imu = torch.stack(slam.test_imu_covs, dim = 0).numpy()
 
-        plt.figure(figsize=(5, 5))
-        plot_on_ax_3d(plt.axes(), poses_imu, poses_est)
-        plt.title("PyPose IMU Integrator")
-        plt.legend(["PyPose", "Comp"])
-        plt.savefig("figs/try/3Dpypose_test.png")
-
-        plt.figure(figsize=(5, 5))
-        plot_on_ax_2d(plt.axes(), poses_imu, poses_est, covs_imu)
-        plt.title("PyPose IMU Integrator")
-        plt.legend(["PyPose", "Comp"])
-        plt.savefig("figs/try/2Dpypose_test.png")
+        plot_2d_3d_comps([(poses_imu, covs_imu), (poses_delta_int, None)], ["PyPose", "Deltas Preint."])
 
         # plt.figure(figsize=(5, 5))
         # plt.plot(np.diff(slam.test_imu_times))
@@ -408,16 +396,29 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         
     return poses, tstamps, img_timestamps
 
-def plot_on_ax_3d(ax, poses_imu, poses):
-    ax = plt.axes(projection='3d')
-    ax.plot3D(poses_imu[:,0], poses_imu[:,1], poses_imu[:,2], 'b')
-    ax.plot3D(poses[:,0], poses[:,1], poses[:,2], 'r')
+def plot_2d_3d_comps(poses_cov, labels):
+    save_folder = "figs/Try/"
+    colors = ["b", "r", "g", "y"]
+    assert len(poses_cov) == len(labels), "Not matching label and traj/pose lists"
 
-def plot_on_ax_2d(ax, poses_imu, poses, covs_imu):
+    plt.figure(figsize=(5, 5))
+    ax = plt.axes(projection='3d')
+    for num, (poses,_) in enumerate(poses_cov):
+        ax.plot3D(poses[:,0], poses[:,1], poses[:,2], colors[num])
+    plt.title("Pose Comparisson")
+    plt.legend(labels)
+    plt.savefig(save_folder + "3Dpypose_comp.png")
+
+    plt.figure(figsize=(5, 5))
     ax = plt.axes()
-    ax.plot(poses_imu[:,0], poses_imu[:,1], 'b')
-    ax.plot(poses[:,0], poses[:,1], 'r')
-    plot_gaussian(ax, poses_imu[:, 0:2], covs_imu[:, 6:8,6:8])
+    for num, (poses,covs) in enumerate(poses_cov):
+        ax.plot(poses[:,0], poses[:,1], colors[num])
+        if covs is not None:
+            plot_gaussian(ax, poses[:, 0:2], covs[:, 6:8,6:8], color=colors[num])
+    plt.title("Pose Comparisson")
+    plt.legend(labels)
+    plt.savefig(save_folder + "2Dpypose_test.png")
+    
 
 from matplotlib.patches import Ellipse
 from matplotlib.collections import PatchCollection
@@ -431,7 +432,7 @@ def plot_gaussian(ax, means, covs, color=None, sigma=3):
         slope = eigvecs[1][0] / eigvecs[1][1]
         angle = 180.0 * np.arctan(slope) / np.pi
         ellipses.append(Ellipse(means[i, 0:2], axis[0], axis[1], angle=angle))
-    ax.add_collection(PatchCollection(ellipses, edgecolors=color, linewidth=1))
+    ax.add_collection(PatchCollection(ellipses, edgecolors=color, alpha= 0.05, linewidth=1))
 
 def _image_to_cv_fmt(image):
     # Convert image_resized_for_slam (network input) to BGR for display
