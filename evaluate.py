@@ -374,30 +374,37 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         poses_est = g_traj_ref.positions_xyz
         poses_est = poses_est - poses_est[0]
 
+        print(slam.delta_poses[:3])
+        print(slam.test_imu_poses[:3])
 
-        poses_imu = torch.cat(slam.imu_poses).numpy()
+        poses_est = torch.cat(slam.delta_poses).numpy()
+
+
+        poses_imu = torch.cat(slam.test_imu_poses).numpy()
         #poses_gt = torch.cat(poses_gt).numpy()
-        covs_imu = torch.stack(slam.imu_covs, dim = 0).numpy()
+        covs_imu = torch.stack(slam.test_imu_covs, dim = 0).numpy()
 
         plt.figure(figsize=(5, 5))
         plot_on_ax_3d(plt.axes(), poses_imu, poses_est)
         plt.title("PyPose IMU Integrator")
-        plt.legend(["PyPose", "Ground Truth"])
-        plt.savefig("figs/3Dpypose_test.png")
+        plt.legend(["PyPose", "Comp"])
+        plt.savefig("figs/try/3Dpypose_test.png")
 
         plt.figure(figsize=(5, 5))
         plot_on_ax_2d(plt.axes(), poses_imu, poses_est, covs_imu)
         plt.title("PyPose IMU Integrator")
-        plt.legend(["PyPose", "Ground Truth"])
-        plt.savefig("figs/2Dpypose_test.png")
+        plt.legend(["PyPose", "Comp"])
+        plt.savefig("figs/try/2Dpypose_test.png")
 
-        plt.figure(figsize=(5, 5))
-        plt.plot(np.diff(slam.imu_times))
-        plt.title("PyPose IMU times")
-        plt.savefig("figs/imu_times_test.png")
-        print("\nIMU TIME CHECK: ",np.sum(np.diff(slam.imu_times)), "---", slam.imu_times[-1],"\n")
+        # plt.figure(figsize=(5, 5))
+        # plt.plot(np.diff(slam.test_imu_times))
+        # plt.title("PyPose IMU times")
+        # plt.savefig("figs/try/imu_times_test.png")
+        # print("\nIMU TIME CHECK: ",np.sum(np.diff(slam.test_imu_times)), "---", slam.test_imu_times[-1],"\n")
+
     except Exception as e:
         print("Failed to plot IMU", e)
+        raise e
         
     return poses, tstamps, img_timestamps
 

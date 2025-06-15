@@ -1,7 +1,6 @@
 import torch
 from torch_scatter import scatter_sum
 
-from . import fastba
 from . import lietorch
 from .lietorch import SE3
 
@@ -98,13 +97,19 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M,
     """
     
     for _ in range(iterations):
-        poses_window = poses[:, t0:t1].clone()
+        # poses_window = poses[:, t0:t1].clone()
+        poses_window = poses.clone()
+
         mask = (ii >= t0) & (ii < t1) & (jj >= t0) & (jj < t1)
         
-        ii_filt, jj_filt, kk_filt = ii[mask], jj[mask], kk[mask]
-        target_filt, weight_filt = target[:, mask], weight[:, mask]
+        # ii_filt, jj_filt, kk_filt = ii[mask], jj[mask], kk[mask]
+        # target_filt, weight_filt = target[:, mask], weight[:, mask]
+        # ii_rel, jj_rel = ii_filt - t0, jj_filt - t0
 
-        ii_rel, jj_rel = ii_filt - t0, jj_filt - t0
+        ii_filt, jj_filt, kk_filt = ii, jj, kk
+        target_filt, weight_filt = target, weight
+        ii_rel, jj_rel = ii_filt, jj_filt
+
         unique_kk_filt, kk_rel = torch.unique(kk_filt, return_inverse=True)
         patches_window = patches[:, unique_kk_filt].clone()
 
@@ -129,13 +134,13 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M,
             fixedp=fixedp,
             **kwargs)
 
-        poses[:, t0:t1] = poses_updated
+        poses[:, t0:t1] = poses_updated[:, t0:t1]    
         patches[:, unique_kk_filt] = patches_updated
 
     return poses, patches
 
 
-def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=100.0, PRINT=False, fixedp=1, structure_only=False):
+def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=1.0, PRINT=False, fixedp=1, structure_only=False):
     """ Original Python-based bundle adjustment implementation. """
 
     b = 1
@@ -177,6 +182,8 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
     vi = torch.matmul(wJiT, r)
     vj = torch.matmul(wJjT, r)
 
+    #TODO(?): fixed dp from 1 to 1..6 (cuda version)
+
     n_adj = n - fixedp
     ii_adj, jj_adj = ii - fixedp, jj - fixedp
     kx, kk_adj = torch.unique(kk, return_inverse=True, sorted=True)
@@ -193,10 +200,10 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
     E = safe_scatter_add_mat(Eik, ii_adj, kk_adj, n_adj, m).view(b, n_adj, m, 6, 1) + \
         safe_scatter_add_mat(Ejk, jj_adj, kk_adj, n_adj, m).view(b, n_adj, m, 6, 1) 
 
-    C = safe_scatter_add_vec(torch.matmul(wJzT, Jz), kk_adj, m)
-
     v = safe_scatter_add_vec(vi, ii_adj, n_adj).view(b, n_adj, 1, 6, 1) + \
         safe_scatter_add_vec(vj, jj_adj, n_adj).view(b, n_adj, 1, 6, 1)
+    
+    C = safe_scatter_add_vec(torch.matmul(wJzT, Jz), kk_adj, m)
 
     w = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk_adj, m)
     Q = 1.0 / (C + lmbda)

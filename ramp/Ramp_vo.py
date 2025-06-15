@@ -23,8 +23,10 @@ Id = SE3.Identity(1, device="cuda")
 from constans import TARTAN_2_XYZ_P, TARTAN_2_XYZ_Q
 from ramp.ba import BA as pyBA
 
-BundleAdjustment = fastba.BA
+#BundleAdjustment = fastba.BA
 BundleAdjustment = pyBA
+
+GRAVITY = torch.tensor([0, 0, -9.81])
 
 class Ramp_vo:
     def __init__(self, cfg, network, train_cfg, ht=480, wd=640, enable_timing=False):
@@ -120,16 +122,29 @@ class Ramp_vo:
         cheat_vel_init =  v_init_tartan[TARTAN_2_XYZ_P]
 
         #cheat_vel_init = torch.tensor([0.0, 0.0, 0.0])
-        self.imu_preintegrator = pp.module.IMUPreintegrator(vel=cheat_vel_init,
+        self.test_imu_preintegrator = pp.module.IMUPreintegrator(vel=cheat_vel_init,
                                                             #gravity=0.0,
                                                             rot=so3_init_cheat)
+        
+        # IMU preintegrator for the deltas
+        self.integrator = pp.module.IMUPreintegrator(
+            gravity=0.0
+        ) #.to(device)
+
+        self.current_p_pred = torch.zeros(3)
+        self.current_v_pred = cheat_vel_init.clone()
+        self.current_R_pred = so3_init_cheat.clone()
+
         
         self.dt = torch.tensor([0.0033333333333333], dtype=torch.float32)
         self.dt = torch.tensor([(3.0 + (1/3))*1e-3 ], dtype=torch.float32)
 
-        self.imu_poses = []
-        self.imu_covs = []
-        self.imu_times = []
+        self.test_imu_poses = []
+        self.test_imu_covs = []
+        self.test_imu_times = []
+
+        self.delta_poses = []
+        self.delta_covs = []
 
         self.all_poses = []
 
@@ -539,23 +554,52 @@ class Ramp_vo:
             imu_t, gyro, acc = curr_imu_data
             #print("\n\n",imu_t[-1], timestamp,"\n")
             dt = self.dt
-            self.imu_times.extend(imu_t)
+            self.test_imu_times.extend(imu_t)
             for gyro_single, acc_single in zip(gyro, acc):
 
                 _gy = torch.tensor(gyro_single, dtype=torch.float32)
                 _ac = torch.tensor(acc_single, dtype=torch.float32)
 
-                imu_state = self.imu_preintegrator(dt=dt, 
+                imu_state = self.test_imu_preintegrator(dt=dt, 
                                                    gyro=_gy, 
                                                    acc=_ac)
-                self.imu_poses.append(imu_state['pos'][..., -1, :].cpu())
-                self.imu_covs.append(imu_state['cov'][..., -1, :, :].cpu())
-            
-            # # Store the preintegrated measurement for the new keyframe
+                
+            self.test_imu_poses.append(imu_state['pos'][..., -1, :].cpu())
+            self.test_imu_covs.append(imu_state['cov'][..., -1, :, :].cpu())
+
+
+
+            frame_gy = torch.tensor(gyro, dtype=torch.float32)
+            frame_ac = torch.tensor(acc, dtype=torch.float32)
+
+            frame_dt = torch.tensor(np.concatenate((np.diff(imu_t)*1e-9, self.dt)).reshape(-1,1), dtype=torch.float32)
+
+            out_dict = self.integrator.integrate(frame_dt.unsqueeze(0), 
+                                                frame_gy.unsqueeze(0), 
+                                                frame_ac.unsqueeze(0))
+                
+            # No need to reset when calling .integrate
+
             # if self.n > 0:
-            #     # Might need to reset the preintegrator after each keyframe and get the delta.
-            #     preintegrated_measurement = self.imu_preintegrator.get_delta() 
-            #     self.imu_preintegrations[self.n] = preintegrated_measurement
+            delta_p = out_dict["Dp"].clone()[...,-1,:]
+            delta_v = out_dict["Dv"].clone()[...,-1,:]
+            delta_r = out_dict["Dr"].clone()[...,-1,:]
+            delta_t = out_dict["Dt"].clone()[...,-1,:]
+            
+
+
+            p_new_pred = self.current_p_pred + self.current_v_pred * delta_t + 0.5 * GRAVITY * delta_t**2 + self.current_R_pred * delta_p
+            v_new_pred = self.current_v_pred + GRAVITY * delta_t + self.current_R_pred * delta_v
+            R_new_pred = self.current_R_pred * delta_r
+
+            self.delta_poses.append(p_new_pred)
+            self.delta_covs.append(torch.ones((9,9), dtype=torch.float32)*1e-1)
+
+            self.current_p_pred = p_new_pred
+            self.current_v_pred = v_new_pred
+            self.current_R_pred = R_new_pred
+
+
 
         if len(input_) > 2:
             _, _, mask = input_
