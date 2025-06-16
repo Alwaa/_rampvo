@@ -91,7 +91,7 @@ def block_solve(A, B, ep=1.0, lm=1e-4):
     return X_flat.reshape(b, n_blocks, 1, p, 1)
 
 
-def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False):
+def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False, imu_preintegrations=None):
     """
     Wrapper for the Python-based Bundle Adjustment.
     """
@@ -131,7 +131,8 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M,
             jj=jj_rel,
             kk=kk_rel,
             bounds=bounds_arg,
-            fixedp=fixedp)
+            fixedp=fixedp, 
+            imu_preintegrations=None)
 
         poses[:, t0:t1] = poses_updated[:, t0:t1]    
         patches[:, unique_kk_filt] = patches_updated
@@ -139,7 +140,7 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M,
     return poses, patches
 
 
-def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=1.0, PRINT=False, fixedp=1, structure_only=False):
+def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=1.0, PRINT=False, fixedp=1, structure_only=False, imu_preintegrations=None):
     """ Original Python-based bundle adjustment implementation. """
 
     b = 1

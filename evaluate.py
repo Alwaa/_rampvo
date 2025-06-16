@@ -385,7 +385,7 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
         covs_imu = torch.stack(slam.test_imu_covs, dim = 0).numpy()
 
         plot_2d_3d_comps([(poses_imu, covs_imu), (poses_delta_int, None), (poses_delta_key, None)], 
-                         ["PyPose", "Deltas Preint.", "Deltas KeyFrames"])
+                         ["PyPose", "Deltas Preint.", "Deltas KeyFrames Tensor"])
 
         # plt.figure(figsize=(5, 5))
         # plt.plot(np.diff(slam.test_imu_times))

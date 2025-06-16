@@ -55,7 +55,31 @@ def commbine_deltas(delta_0: dict, delta_1: dict) -> dict:
 
     return comb_delta
 
+def tensor_commbine_deltas(delta_0, delta_1):
+    """ Combine Deltas from (0->1) and (1->2) to get (0->2) """
+    delta_p_R_0, delta_v_0, delta_t_0 = delta_0
+    delta_p_R_1, delta_v_1, delta_t_1 = delta_1
+    
+   
+    R_01 = pp.SO3(delta_p_R_0[3:])
+    R_12 = pp.SO3(delta_p_R_1[3:])
+    R_02 =  R_01 * R_12
 
+    Dp_0, Dp_1 = delta_p_R_0[:3],delta_p_R_1[:3]
+    Dv_0, Dv_1 = delta_v_0, delta_v_1
+    Dt_0, Dt_1 = delta_t_0, delta_t_1
+
+    dt_02 = Dt_0 + Dt_1
+    dv_02 = Dv_0 + R_01 * Dv_1
+    dp_02 = Dp_0 + Dv_0 *Dt_1 + R_01 * Dp_1
+
+    D_r_R_02 = torch.zeros(7, dtype=torch.float, device="cuda")
+    D_r_R_02[:3] = dp_02
+    D_r_R_02[3:] = R_02
+    
+    #torch.cat((dp_02, R_02))
+
+    return D_r_R_02, dv_02, dt_02
 
 class Ramp_vo:
     def __init__(self, cfg, network, train_cfg, ht=480, wd=640, enable_timing=False):
@@ -94,6 +118,15 @@ class Ramp_vo:
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
         )   # Patch index, Buff num, (px,py,depth), PATCH DIM, PATCH DIM
         self.intrinsics_ = torch.zeros(self.N, 4, dtype=torch.float, device="cuda")
+
+        ### Ading imu ###
+
+        self.imu_delta_p_R_ = torch.zeros(self.N, 7, dtype=torch.float, device="cuda") # Tranlation + Rot
+        self.imu_delta_v_ = torch.zeros(self.N, 3, dtype=torch.float, device="cuda")
+        self.imu_delta_t_ = torch.zeros(self.N, 1, dtype=torch.float, device="cuda")
+        self.imu_biases_ = torch.zeros(self.N, 9, dtype=torch.float, device="cuda") # TODO: Incorporate
+
+        ### --------- ###
 
         self.points_ = torch.zeros(self.N * self.M, 3, dtype=torch.float, device="cuda")
         self.colors_ = torch.zeros(self.N, self.M, 3, dtype=torch.uint8, device="cuda")
@@ -308,6 +341,7 @@ class Ramp_vo:
             _state = IMU_prop(_state, delta)
             self.key_delta_poses.append(_state["p"].clone())
         
+        print(_state)
 
         poses = [self.get_pose(count_i) for count_i in range(self.counter)]
         poses = lietorch.stack(poses, dim=0)
@@ -315,6 +349,23 @@ class Ramp_vo:
         tstamps = np.array(self.tlist, dtype=float)
 
         print(self.straight_deltas_t_cum, t, self.curr_timestamp)
+
+        _state = {"p": self.imu_deltas_zero["p"].cuda(),
+                  "v": self.imu_deltas_zero["v"].cuda(),
+                  "R": self.imu_deltas_zero["R"].cuda(),
+                  }
+        
+        self.key_delta_poses = []
+        GRAVITY_GPU = torch.tensor([0, 0, -9.81], device="cuda")
+        for i in range(self.n):
+            _delta = {"Dr": pp.SO3(self.imu_delta_p_R_[i,3:]),
+                      "Dp": self.imu_delta_p_R_[i,:3],
+                      "Dt": self.imu_delta_t_[i],
+                      "Dv": self.imu_delta_v_[i,:],}
+            _state = IMU_prop(_state, _delta, GRAVITY=GRAVITY_GPU)
+            
+            self.key_delta_poses.append(_state["p"].cpu().unsqueeze(0))
+        print(_state)
 
 
         # print("\n\nLEN OF DELTAS:\n", len(self.all_deltas))
@@ -480,6 +531,15 @@ class Ramp_vo:
             self.imu_key_deltas[k-1] = commbine_deltas(self.imu_key_deltas[k-1], self.imu_key_deltas[k])
             # print("\n\n",max(self.imu_deltas.keys()), self.n, k, "\n\n")
 
+            self.imu_delta_p_R_[k-1],self.imu_delta_v_[k-1],self.imu_delta_t_[k-1] = tensor_commbine_deltas(
+                (self.imu_delta_p_R_[k-1],self.imu_delta_v_[k-1],self.imu_delta_t_[k-1]),
+                (self.imu_delta_p_R_[k],self.imu_delta_v_[k],self.imu_delta_t_[k])
+            )
+
+            # self.imu_delta_p_R_
+            # self.imu_delta_v_
+            # self.imu_delta_t_
+
             to_remove = (self.ii == k) | (self.jj == k)
             self.remove_factors(to_remove)
 
@@ -489,6 +549,8 @@ class Ramp_vo:
 
             for i in range(k, self.n - 1):
                 self.imu_deltas[i] = self.imu_deltas[i + 1]
+
+                self.imu_delta_p_R_[i],self.imu_delta_v_[i],self.imu_delta_t_[i] = self.imu_delta_p_R_[i+1],self.imu_delta_v_[i+1],self.imu_delta_t_[i+1]
 
                 self.frame_indxs_[i] = self.frame_indxs_[i + 1]
                 self.colors_[i] = self.colors_[i + 1]
@@ -711,14 +773,9 @@ class Ramp_vo:
             _, _, mask = input_
             if not mask and mask is not None:
                 # if only events only update the super state but not the VO
-                
-                # print("\n\n\n   D:   \n", self.imu_deltas_buffer,"\n", frame_delta, "\n\n")
 
                 return
         
-        # print("\n", 20*"-", "\n")      
-        # print(self.imu_deltas_buffer,"\n", frame_delta)
-        # print("\n", 20*"-", "\n")
 
         ### update state attributes ###
 
@@ -778,7 +835,14 @@ class Ramp_vo:
                     self.pose_delta[self.counter - 1] = (self.counter - 2, Id[0])
 
                     return
+        
 
+        #print("\n\n", self.imu_delta_p_R_[self.n])
+        self.imu_delta_p_R_[self.n, :3] = self.imu_deltas_buffer["Dp"]
+        self.imu_delta_p_R_[self.n, 3:] = self.imu_deltas_buffer["Dr"]
+        self.imu_delta_v_[self.n]       = self.imu_deltas_buffer["Dv"]
+        self.imu_delta_t_[self.n]       = self.imu_deltas_buffer["Dt"]
+        #print("\n\n", self.imu_delta_p_R_[self.n])
 
         # update number of keyframes and number of total patches
         self.n += 1
