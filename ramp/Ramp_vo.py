@@ -185,8 +185,8 @@ class Ramp_vo:
         delta_r = init_delta_dict["Dr"].clone()[...,-1,:]
         delta_t = init_delta_dict["Dt"].clone()[...,-1,:]
         
-        self.imu_deltas_buffer = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
-        self.imu_deltas[0] = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t,}
+        self.imu_deltas_buffer = {"Dp": delta_p, "Dv": delta_v,"Dr": delta_r,"Dt": delta_t}
+        self.imu_deltas[0] = {"Dp": delta_p.clone(), "Dv": delta_v.clone(),"Dr": delta_r.clone(),"Dt": delta_t.clone()}
 
         self.imu_deltas_zero = {"p": torch.zeros(3),
                                   "v": cheat_vel_init.clone(),
@@ -198,6 +198,8 @@ class Ramp_vo:
         self.all_poses = []
 
         self.all_deltas = []
+        self.test_deltas = []
+        self.imu_key_deltas = []
 
 
         self.imu_preintegrations = {} # Store preintegration between keyframes
@@ -294,15 +296,17 @@ class Ramp_vo:
         self.traj = {}
         for i in range(self.n):
             self.traj[self.frame_indxs_[i].item()] = self.poses_[i]
+        
+        imu_deltas = self.imu_key_deltas #self.test_deltas
 
-        print("\nNN\n", self.n, len(self.imu_deltas), "\n\n")
-        prev_state = self.imu_deltas_zero
+        print("\nNN\n", self.n, len(imu_deltas), "\n\n")
+        _state = self.imu_deltas_zero
         t = 0
-        GRAVITY_2 = torch.tensor([0, 0, 0]) # TESTING
-        for i in range(0, self.n):
-            t += self.imu_deltas[i]["Dt"]
-            prev_state = IMU_prop(prev_state, self.imu_deltas[i]) #, GRAVITY=GRAVITY_2
-            self.key_delta_poses.append(prev_state["p"].clone())
+        
+        for i, delta in enumerate(imu_deltas):
+            t += delta["Dt"]
+            _state = IMU_prop(_state, delta)
+            self.key_delta_poses.append(_state["p"].clone())
         
 
         poses = [self.get_pose(count_i) for count_i in range(self.counter)]
@@ -311,27 +315,29 @@ class Ramp_vo:
         tstamps = np.array(self.tlist, dtype=float)
 
         print(self.straight_deltas_t_cum, t, self.curr_timestamp)
-        print("\n\nLEN OF DELTAS:\n", len(self.all_deltas))
-        deltas_to_marginalize = [100]*100 + [300]*300 #+ list(range(500,850))
-        for di in deltas_to_marginalize:
-            self.all_deltas[di - 1] = commbine_deltas(self.all_deltas[di - 1],self.all_deltas[di])
 
-            for _i in range(di, len(self.all_deltas)-1):
-                self.all_deltas[_i] = self.all_deltas[_i +1 ]
-            self.all_deltas = self.all_deltas[:-1]
+
+        # print("\n\nLEN OF DELTAS:\n", len(self.all_deltas))
+        # deltas_to_marginalize = [100]*100 + [300]*300 #+ list(range(500,850))
+        # for di in deltas_to_marginalize:
+        #     self.all_deltas[di - 1] = commbine_deltas(self.all_deltas[di - 1],self.all_deltas[di])
+
+        #     for _i in range(di, len(self.all_deltas)-1):
+        #         self.all_deltas[_i] = self.all_deltas[_i +1 ]
+        #     self.all_deltas = self.all_deltas[:-1]
         
 
-        print("\n\nNEW LEN OF DELTAS:\n", len(self.all_deltas))
+        # print("\n\nNEW LEN OF DELTAS:\n", len(self.all_deltas))
 
-        _state = self.imu_deltas_zero
-        _delta_running = self.imu_deltas[0]
-        self.key_delta_poses = []
-        for new_delta in self.all_deltas:
-            # _state = IMU_prop(_state, new_delta)
-            # self.key_delta_poses.append(_state["p"])
+        # _state = self.imu_deltas_zero
+        # _delta_running = self.imu_deltas[0]
+        # self.key_delta_poses = []
+        # for new_delta in self.all_deltas:
+        #     _state = IMU_prop(_state, new_delta)
+        #     self.key_delta_poses.append(_state["p"])
 
-            _delta_running = commbine_deltas(_delta_running, new_delta)
-            self.key_delta_poses.append(IMU_prop(self.imu_deltas_zero, _delta_running)["p"])
+        #     # _delta_running = commbine_deltas(_delta_running, new_delta)
+        #     # self.key_delta_poses.append(IMU_prop(self.imu_deltas_zero, _delta_running)["p"])
 
         return poses, tstamps
     
@@ -471,6 +477,7 @@ class Ramp_vo:
 
             #print("\n\nDELTA:", t1, self.curr_timestamp, "\n", k, self.n, "\n")
             self.imu_deltas[k-1] = commbine_deltas(self.imu_deltas[k-1], self.imu_deltas[k]) #TODO: Check off by one
+            self.imu_key_deltas[k-1] = commbine_deltas(self.imu_key_deltas[k-1], self.imu_key_deltas[k])
             # print("\n\n",max(self.imu_deltas.keys()), self.n, k, "\n\n")
 
             to_remove = (self.ii == k) | (self.jj == k)
@@ -493,8 +500,15 @@ class Ramp_vo:
                 self.gmap_[i % self.mem] = self.gmap_[(i + 1) % self.mem]
                 self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
                 self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
-            
-            self.imu_deltas[self.n] = None
+
+            #print("\n\n", len(self.imu_key_deltas), self.n)
+            #assert len(self.imu_key_deltas) == self.n, "Not N in imu key deltas"
+            for i in range(k, self.n - 1):
+                self.imu_key_deltas[i] = self.imu_key_deltas[i + 1]
+            self.imu_key_deltas.pop()
+
+            for _i in range(self.n, max(self.imu_deltas.keys()) + 1):
+                self.imu_deltas.pop(_i, None)
 
             self.n -= 1
             self.m -= self.M
@@ -774,6 +788,9 @@ class Ramp_vo:
             # add edges to the graph
             self.append_factors(*self.__edges_forw())
             self.append_factors(*self.__edges_back())
+        
+        self.test_deltas.append(self.imu_deltas_buffer)
+        self.imu_key_deltas.append(self.imu_deltas_buffer)
 
         self.imu_deltas[self.n] = self.imu_deltas_buffer
         self.imu_deltas_buffer = self.imu_deltas[0]
@@ -783,10 +800,6 @@ class Ramp_vo:
         if self.n == 8 and not self.is_initialized:
             with Timer("SLAM.NotInitializedUpdate", enabled=self.enable_timing):
                 self.is_initialized = True
-
-                print("\n\nMMMMM\n\n")
-                print(self.imu_deltas_buffer)
-                print("\n\nMMMMM\n\n")
 
                 for itr in range(12):
                     self.update()
