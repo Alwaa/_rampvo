@@ -25,6 +25,7 @@ from ramp.ba import BA as pyBA
 
 #BundleAdjustment = fastba.BA
 BundleAdjustment = pyBA
+USE_IMU_IN_BA = True
 
 GRAVITY_BASE = torch.tensor([0, 0, -9.81])
 
@@ -114,6 +115,9 @@ class Ramp_vo:
 
         self.frame_indxs_ = torch.zeros(self.N, dtype=torch.long, device="cuda")
         self.poses_ = torch.zeros(self.N, 7, dtype=torch.float, device="cuda")
+
+        self.velocities_ = torch.zeros(self.N, 3, dtype=torch.float, device="cuda") #Merge with poses_ later?
+
         self.patches_ = torch.zeros(
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
         )   # Patch index, Buff num, (px,py,depth), PATCH DIM, PATCH DIM
@@ -616,6 +620,12 @@ class Ramp_vo:
             t0 = max(t0, 1)
 
             try:
+                if USE_IMU_IN_BA:
+                    imu_pre = self.imu_key_deltas
+                    vel = self.velocities_
+                else:
+                    imu_pre, vel = None, None
+
                 BundleAdjustment(
                     self.poses,
                     self.patches,
@@ -631,10 +641,12 @@ class Ramp_vo:
                     M=self.M,
                     iterations=2,
                     eff_impl=False,
+                    imu_preintegrations=imu_pre,
+                    velocities=vel
                 )
             except Exception as e:
                 print(f"WARNING: BA failed...{e}")
-                raise e
+                raise e #TODO: REMOVE
 
         # Old Viz
         self._update_store_old_viz()
