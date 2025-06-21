@@ -92,7 +92,8 @@ def block_solve(A, B, ep=1.0, lm=1e-4):
     return X_flat.reshape(b, n_blocks, 1, p, 1)
 
 
-def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False, imu_preintegrations=None, velocities = None):
+def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M, iterations, eff_impl=False, 
+       imu_preintegrations=None, imu_tensors = None, velocities = None):
     """
     Wrapper for the Python-based Bundle Adjustment.
     """
@@ -133,8 +134,10 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M,
             jj=jj_rel,
             kk=kk_rel,
             bounds=bounds_arg,
-            fixedp=fixedp, 
-            imu_preintegrations=imu_preintegrations, 
+            fixedp=fixedp,
+            t1 = t1,
+            imu_preintegrations=imu_preintegrations,
+            imu_tensors=imu_tensors,
             velocities=velocities_window
             )
         
@@ -150,7 +153,9 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, M,
     return poses, patches
 
 
-def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=1.0, PRINT=False, fixedp=1, structure_only=False, imu_preintegrations=None, velocities = None):
+def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, t1,
+            ep=1.0, PRINT=False, fixedp=1, structure_only=False, 
+            imu_preintegrations=None, imu_tensors = None, velocities = None):
     """ Original Python-based bundle adjustment implementation. """
 
     b = 1
@@ -219,6 +224,9 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
     v = safe_scatter_add_vec(vi, ii_adj, n_adj).view(b, n_adj, 1, 6, 1) + \
         safe_scatter_add_vec(vj, jj_adj, n_adj).view(b, n_adj, 1, 6, 1)
     
+    # print("orig: ", vi.shape, ii_adj.shape, n_adj)
+    # print("OOO:", v.shape, b, n_adj, 1, 6, 1)
+    
     C = safe_scatter_add_vec(torch.matmul(wJzT, Jz), kk_adj, m)
 
     w = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk_adj, m)
@@ -234,70 +242,158 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
         
         g = torch.tensor([0, 0, -9.81], device=poses.device, dtype=poses.dtype)
 
-        # Loop through each preintegrated measurement
-        # 'j' is the index of the 'to' keyframe for the measurement
-        for j, imu_data in enumerate(imu_preintegrations):
-            i = j - 1 # The 'from' keyframe
-            if i < fixedp: # Don't apply constraints to the fixed frame
-                continue
+        if imu_tensors is not None:
 
-            # Extract states for the two keyframes
-            pose_i = pp.SE3(poses[:, i])
-            pose_j = pp.SE3(poses[:, j])
-            vel_i = velocities[i,:] # vel_i = velocities[:, i]
-            vel_j = velocities[j,:] # vel_j = velocities[:, j]
-
-            # Extract IMU measurements from your data structure
-            delta_p_imu = imu_data['Dp'].cuda()
-            delta_v_imu = imu_data['Dv'].cuda()
-            delta_r_imu = pp.SO3(imu_data['Dr']).cuda() # Convert to SO3
-            dt = imu_data['Dt'].cuda()
 
             # --- 1. Calculate Predicted Relative Motion from BA States ---
+            delta_pose_tensor, delta_vel_tensor, delta_t_tensor = imu_tensors
+        
+            # Define the range of indices for the IMU measurements
+            num_imu_measurements = t1 - 1
 
-            R_i = pp.SE3(poses[:, i]).rotation()
-            R_j = pp.SE3(poses[:, j]).rotation()
+            #TODO: CHECK INDECIES
+            i_indices = torch.arange(1 + fixedp - 1, num_imu_measurements)
+            j_indices = torch.arange(1 + fixedp, num_imu_measurements + 1)
             
-            # Predicted rotation change
-            predicted_delta_r = R_i.Inv() * R_j.Inv()
+            # --- Batch extract states using advanced indexing ---
+            pose_i = pp.SE3(poses[:, i_indices])
+            pose_j = pp.SE3(poses[:, j_indices])
+            vel_i = velocities[:, i_indices]
+            vel_j = velocities[:, j_indices]
+
+            # --- Batch extract IMU measurements from tensors ---
+            delta_p_imu = delta_pose_tensor[i_indices, :3]
+            delta_r_imu = pp.SO3(delta_pose_tensor[i_indices, 3:])
+            delta_v_imu = delta_vel_tensor[i_indices, :]
+
+            dt = delta_t_tensor[i_indices].unsqueeze(0)
+
+            # --- 1. Vectorized Calculation of Predicted Relative Motion ---
+            R_i = pose_i.rotation()
             
-            # Predicted velocity change (in body frame of i)
+            predicted_delta_r = R_i.Inv() * pose_j.rotation()
             predicted_delta_v = R_i.Inv() @ (vel_j - vel_i - g * dt)
-            
-            # Predicted position change (in body frame of i)
-            # print(pose_i.translation(),vel_i )
+
             predicted_delta_p = R_i.Inv() @ (
                 pose_j.translation() - pose_i.translation() - vel_i * dt - 0.5 * g * dt**2
             )
 
-            # --- 2. Calculate the 9-DOF IMU Residual (Error) ---
+
+            # --- 2. Vectorized Calculation of the 9-DOF IMU Residual ---
+
+            # print((delta_r_imu.Inv() * predicted_delta_r))
+            # print((delta_r_imu.Inv() * predicted_delta_r).Log())
+
             residual_r = (delta_r_imu.Inv() * predicted_delta_r).Log()
             residual_v = predicted_delta_v - delta_v_imu
             residual_p = predicted_delta_p - delta_p_imu
 
-            # --- 3. Add the IMU cost to the Gauss-Newton system ---
-            # This is a simplified approach. Instead of full Jacobians, we add
-            # the residual to the 'v' vector, which pushes the solution
-            # in the correct direction.
+
+            # --- 3. Vectorized Addition of IMU cost to the Gauss-Newton system ---
             
-            # We need to construct a 6D tangent-space error for the pose update
-            # by combining position and rotation residuals.
-            # print(residual_r)
             pose_error_tangent = torch.cat([
-                residual_p * imu_pos_weight, 
+                residual_p * imu_pos_weight,
                 residual_r * imu_rot_weight
             ], dim=-1)
 
-            # Add residual for keyframe 'i' (note the negative sign)
-            v[:, i - fixedp, 0, :, 0] -= pose_error_tangent
+            # Use scatter_add to update the 'v' vector in a vectorized way
+            v_flat = v.view(b, n_adj, 6).cpu()
 
-            # Add residual for keyframe 'j'
-            # The error for j has the opposite effect on the combined pose
-            v[:, j - fixedp, 0, :, 0] += pose_error_tangent
+            # pose_error_tangent has shape (k, 6) where k is the number of valid measurements
+            # We need to add the batch dimension to match v_flat.
+            src_tangent = pose_error_tangent #.unsqueeze(0)  # Shape becomes (1, k, 6)
             
-            # We can also add a penalty for velocity. Since velocity is not in the
-            # original 'B' matrix, we can add it to the 'poses_and_vels' update later,
-            # or modify the 'block_solve' part. For now, let's focus on the pose.
+            # Indices need to be adjusted by -fixedp for the 'v' and 'B' matrices
+            i_adj = i_indices - fixedp
+            j_adj = j_indices - fixedp
+
+            i_adj_idx = i_adj.unsqueeze(0).unsqueeze(-1) # Shape becomes (1, k, 1)
+            j_adj_idx = j_adj.unsqueeze(0).unsqueeze(-1) # Shape becomes (1, k, 1)
+
+
+            # print("Check dims: ", pose_error_tangent.shape, src_tangent.shape)
+            # print("Check dims indecies: ", i_adj.shape, i_adj_idx.shape)
+            # print("()()()()()()()()()()()")
+            # print(v.shape)
+            # print(v_flat.shape, i_adj_idx.shape, src_tangent.shape)
+            # print(i_adj_idx, j_adj_idx)
+
+
+            v_flat.scatter_add_(1, i_adj_idx.cpu(), -src_tangent.cpu())
+            v_flat.scatter_add_(1, j_adj_idx.cpu(), src_tangent.cpu())
+            
+
+            # v_flat.scatter_add_(1, i_adj.unsqueeze(-1).expand(-1, -1, 6), -pose_error_tangent)
+            # v_flat.scatter_add_(1, j_adj.unsqueeze(-1).expand(-1, -1, 6),  pose_error_tangent)
+            
+            v = v_flat.view(b, n_adj, 1, 6, 1).cuda()
+
+        else:
+
+            # Loop through each preintegrated measurement
+            # 'j' is the index of the 'to' keyframe for the measurement
+            for j, imu_data in enumerate(imu_preintegrations):
+                i = j - 1 # The 'from' keyframe
+                if i < fixedp: # Don't apply constraints to the fixed frame
+                    continue
+
+                # Extract states for the two keyframes
+                pose_i = pp.SE3(poses[:, i])
+                pose_j = pp.SE3(poses[:, j])
+                vel_i = velocities[:, i]
+                vel_j = velocities[:, j]
+
+                # Extract IMU measurements from your data structure
+                delta_p_imu = imu_data['Dp'].cuda()
+                delta_v_imu = imu_data['Dv'].cuda()
+                delta_r_imu = pp.SO3(imu_data['Dr']).cuda() # Convert to SO3
+                dt = imu_data['Dt'].cuda()
+
+                # --- 1. Calculate Predicted Relative Motion from BA States ---
+
+                R_i = pp.SE3(poses[:, i]).rotation()
+                R_j = pp.SE3(poses[:, j]).rotation()
+                
+                # Predicted rotation change
+                predicted_delta_r = R_i.Inv() * R_j.Inv()
+                
+                # Predicted velocity change (in body frame of i)
+                predicted_delta_v = R_i.Inv() @ (vel_j - vel_i - g * dt)
+                
+                # Predicted position change (in body frame of i)
+                # print(pose_i.translation(),vel_i )
+                predicted_delta_p = R_i.Inv() @ (
+                    pose_j.translation() - pose_i.translation() - vel_i * dt - 0.5 * g * dt**2
+                )
+
+                # --- 2. Calculate the 9-DOF IMU Residual (Error) ---
+                residual_r = (delta_r_imu.Inv() * predicted_delta_r).Log()
+                residual_v = predicted_delta_v - delta_v_imu
+                residual_p = predicted_delta_p - delta_p_imu
+
+                # --- 3. Add the IMU cost to the Gauss-Newton system ---
+                # This is a simplified approach. Instead of full Jacobians, we add
+                # the residual to the 'v' vector, which pushes the solution
+                # in the correct direction.
+                
+                # We need to construct a 6D tangent-space error for the pose update
+                # by combining position and rotation residuals.
+                # print(residual_r)
+                pose_error_tangent = torch.cat([
+                    residual_p * imu_pos_weight, 
+                    residual_r * imu_rot_weight
+                ], dim=-1)
+
+                # # Add residual for keyframe 'i' (note the negative sign)
+                v[:, i - fixedp, 0, :, 0] -= pose_error_tangent
+
+                # # Add residual for keyframe 'j'
+                # # The error for j has the opposite effect on the combined pose
+                v[:, j - fixedp, 0, :, 0] += pose_error_tangent
+                
+                # # We can also add a penalty for velocity. Since velocity is not in the
+                # # original 'B' matrix, we can add it to the 'poses_and_vels' update later,
+                # # or modify the 'block_solve' part. For now, let's focus on the pose.
 
     if structure_only or n_adj == 0:
         dZ = (Q * w).view(b, -1, 1, 1)

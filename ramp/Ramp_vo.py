@@ -26,6 +26,7 @@ from ramp.ba import BA as pyBA
 #BundleAdjustment = fastba.BA
 BundleAdjustment = pyBA
 USE_IMU_IN_BA = True
+USE_VECTORIES_VER = True
 
 GRAVITY_BASE = torch.tensor([0, 0, -9.81])
 
@@ -275,6 +276,10 @@ class Ramp_vo:
     @property
     def poses(self):
         return self.poses_.view(1, self.N, 7)
+
+    @property
+    def velocities(self):
+        return self.velocities_.view(1, self.N, 3) # TODO: Merge with poses as above?
 
     @property
     def patches(self):
@@ -622,9 +627,10 @@ class Ramp_vo:
             try:
                 if USE_IMU_IN_BA:
                     imu_pre = self.imu_key_deltas
-                    vel = self.velocities_
+                    vel = self.velocities
+                    imu_vectorize = (self.imu_delta_p_R_,self.imu_delta_v_,self.imu_delta_t_) if USE_VECTORIES_VER else None
                 else:
-                    imu_pre, vel = None, None
+                    imu_pre, vel, imu_vectorize = None, None, None
 
                 BundleAdjustment(
                     self.poses,
@@ -642,6 +648,7 @@ class Ramp_vo:
                     iterations=2,
                     eff_impl=False,
                     imu_preintegrations=imu_pre,
+                    imu_tensors=imu_vectorize,
                     velocities=vel
                 )
             except Exception as e:
