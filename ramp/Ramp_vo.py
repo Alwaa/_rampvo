@@ -22,11 +22,17 @@ Id = SE3.Identity(1, device="cuda")
 
 from constans import TARTAN_2_XYZ_P, TARTAN_2_XYZ_Q
 from ramp.ba import BA as pyBA
+from ramp.ba_pypose import BA as pp_BA
 
 #BundleAdjustment = fastba.BA
-BundleAdjustment = pyBA
-USE_IMU_IN_BA = True
-USE_VECTORIES_VER = True
+
+# BundleAdjustment = pyBA
+# USE_IMU_IN_BA = True
+# USE_VECTORIES_VER = False
+
+BundleAdjustment = pp_BA
+USE_IMU_IN_BA = False
+USE_VECTORIES_VER = False
 
 GRAVITY_BASE = torch.tensor([0, 0, -9.81])
 
@@ -102,6 +108,7 @@ class Ramp_vo:
         self.m = 0  # number of patches
         self.M = self.cfg.PATCHES_PER_FRAME
         self.N = self.cfg.BUFFER_SIZE
+        print("\n\nN:", self.N)
 
         self.ht = ht  # image height
         self.wd = wd  # image width
