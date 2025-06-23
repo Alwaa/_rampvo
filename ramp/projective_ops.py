@@ -1,4 +1,5 @@
 import torch
+from .lietorch import SE3
 
 MIN_DEPTH = 0.2
 
@@ -54,7 +55,11 @@ def transform(poses, patches, intrinsics, ii, jj, kk, depth=False, valid=False, 
     X0 = iproj(patches[:,kk], intrinsics[:,ii])
 
     # transform
-    Gij = poses[:, jj] * poses[:, ii].inv()
+    if isinstance(poses, SE3):
+        Gij = poses[:, jj] * poses[:, ii].inv()
+    else:
+        Gij = poses[:, jj] * poses[:, ii].Inv()
+
 
     if tonly:
         Gij[...,3:] = torch.as_tensor([0,0,0,1], device=Gij.device)

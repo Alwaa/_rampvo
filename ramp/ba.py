@@ -44,6 +44,29 @@ def block_show(A):
     plt.imshow(A[0].detach().cpu().numpy())
     plt.show()
 
+def skew(v):
+    """
+    Convert a batch of 3-element vectors to a batch of 3x3 skew-symmetric matrices.
+    Args:
+        v: tensor of shape (*, 3)
+    Returns:
+        Tensor of shape (*, 3, 3)
+    """
+    # A zero tensor with the same batch shape as the input vector's components
+    z = torch.zeros_like(v[..., 0])
+
+    # Get components of the vector
+    vx, vy, vz = v.unbind(dim=-1)
+
+    # Build the skew-symmetric matrix by stacking the rows
+    row1 = torch.stack([z, -vz, vy], dim=-1)
+    row2 = torch.stack([vz, z, -vx], dim=-1)
+    row3 = torch.stack([-vy, vx, z], dim=-1)
+    
+    S = torch.stack([row1, row2, row3], dim=-2)
+    
+    return S
+
 class CholeskySolver(torch.autograd.Function):
     """ Custom Cholesky solver to avoid crashes with non-positive-definite matrices """
     @staticmethod
@@ -167,25 +190,25 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
         else: 
             return poses, patches, velocities
 
-    coords, v, (Ji, Jj, Jz) = \
+    coords, v_vis, (Ji, Jj, Jz) = \
         pops.transform(SE3(poses), patches, intrinsics, ii, jj, kk, jacobian=True)
     
     patch_size = coords.shape[3]
     r = targets - coords[..., patch_size//2, patch_size//2, :]
 
-    v *= (r.norm(dim=-1) < 250).float()
+    v_vis *= (r.norm(dim=-1) < 250).float()
     in_bounds = \
         (coords[...,patch_size//2,patch_size//2,0] > bounds[0]) & \
         (coords[...,patch_size//2,patch_size//2,1] > bounds[1]) & \
         (coords[...,patch_size//2,patch_size//2,0] < bounds[2]) & \
         (coords[...,patch_size//2,patch_size//2,1] < bounds[3])
-    v *= in_bounds.float()
+    v_vis *= in_bounds.float()
 
     if PRINT:
-        print("Mean Error:", (r * v[...,None]).norm(dim=-1).mean().item())
+        print("Mean Error:", (r * v_vis[...,None]).norm(dim=-1).mean().item())
 
-    r = (v[...,None] * r).unsqueeze(dim=-1)    
-    weights = (v[...,None] * weights).unsqueeze(dim=-1)
+    r = (v_vis[...,None] * r).unsqueeze(dim=-1)    
+    weights = (v_vis[...,None] * weights).unsqueeze(dim=-1)
 
     wJiT = (weights * Ji).transpose(2,3)
     wJjT = (weights * Jj).transpose(2,3)
@@ -213,7 +236,7 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
         else: 
             return poses, patches, velocities
 
-    B = safe_scatter_add_mat(Bii, ii_adj, ii_adj, n_adj, n_adj).view(b, n_adj, n_adj, 6, 6) + \
+    B_vis = safe_scatter_add_mat(Bii, ii_adj, ii_adj, n_adj, n_adj).view(b, n_adj, n_adj, 6, 6) + \
         safe_scatter_add_mat(Bij, ii_adj, jj_adj, n_adj, n_adj).view(b, n_adj, n_adj, 6, 6) + \
         safe_scatter_add_mat(Bji, jj_adj, ii_adj, n_adj, n_adj).view(b, n_adj, n_adj, 6, 6) + \
         safe_scatter_add_mat(Bjj, jj_adj, jj_adj, n_adj, n_adj).view(b, n_adj, n_adj, 6, 6)
@@ -221,17 +244,16 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
     E = safe_scatter_add_mat(Eik, ii_adj, kk_adj, n_adj, m).view(b, n_adj, m, 6, 1) + \
         safe_scatter_add_mat(Ejk, jj_adj, kk_adj, n_adj, m).view(b, n_adj, m, 6, 1) 
 
-    v = safe_scatter_add_vec(vi, ii_adj, n_adj).view(b, n_adj, 1, 6, 1) + \
+    v_vis = safe_scatter_add_vec(vi, ii_adj, n_adj).view(b, n_adj, 1, 6, 1) + \
         safe_scatter_add_vec(vj, jj_adj, n_adj).view(b, n_adj, 1, 6, 1)
     
-    # print("orig: ", vi.shape, ii_adj.shape, n_adj)
-    # print("OOO:", v.shape, b, n_adj, 1, 6, 1)
     
     C = safe_scatter_add_vec(torch.matmul(wJzT, Jz), kk_adj, m)
 
     w = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk_adj, m)
     Q = 1.0 / (C + lmbda)
     
+    print("\nE,Q", E.shape, Q[:,None].shape, "\n")
     EQ = E * Q[:,None]
 
     if imu_preintegrations is not None and not structure_only:
@@ -297,7 +319,7 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
             ], dim=-1)
 
             # Use scatter_add to update the 'v' vector in a vectorized way
-            v_flat = v.view(b, n_adj, 6).cpu()
+            v_flat = v_vis.view(b, n_adj, 6).cpu()
 
             # pose_error_tangent has shape (k, 6) where k is the number of valid measurements
             # We need to add the batch dimension to match v_flat.
@@ -311,30 +333,39 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
             j_adj_idx = j_adj.unsqueeze(0).unsqueeze(-1) # Shape becomes (1, k, 1)
 
 
-            # print("Check dims: ", pose_error_tangent.shape, src_tangent.shape)
-            # print("Check dims indecies: ", i_adj.shape, i_adj_idx.shape)
-            # print("()()()()()()()()()()()")
-            # print(v.shape)
-            # print(v_flat.shape, i_adj_idx.shape, src_tangent.shape)
-            # print(i_adj_idx, j_adj_idx)
-
-
             v_flat.scatter_add_(1, i_adj_idx.cpu(), -src_tangent.cpu())
             v_flat.scatter_add_(1, j_adj_idx.cpu(), src_tangent.cpu())
             
-
-            # v_flat.scatter_add_(1, i_adj.unsqueeze(-1).expand(-1, -1, 6), -pose_error_tangent)
-            # v_flat.scatter_add_(1, j_adj.unsqueeze(-1).expand(-1, -1, 6),  pose_error_tangent)
-            
-            v = v_flat.view(b, n_adj, 1, 6, 1).cuda()
+            v_vis = v_flat.view(b, n_adj, 1, 6, 1).cuda()
 
         else:
+
+            # Store gradients for the velocity update step later
+            velocity_gradients = torch.zeros_like(velocities)
+
+            # Identity matrices for convenience
+            I3 = torch.eye(3, device=poses.device, dtype=poses.dtype)
+            I6 = torch.eye(6, device=poses.device, dtype=poses.dtype)
+
+
+            # You should get this from your IMU preintegration data, inverse of the covariance
+            W_imu = torch.diag(torch.cat([
+                torch.full([3], 0.05), # Rotation weight
+                torch.full([3], 0.05),# Velocity weight
+                torch.full([3], 0.05)  # Position weight
+            ], dim=0)).to(poses.device)
+            
 
             # Loop through each preintegrated measurement
             # 'j' is the index of the 'to' keyframe for the measurement
             for j, imu_data in enumerate(imu_preintegrations):
                 i = j - 1 # The 'from' keyframe
                 if i < fixedp: # Don't apply constraints to the fixed frame
+                    continue
+
+                # Adjust for the fixed frame
+                ii_adj, jj_adj = i - fixedp, j - fixedp
+                if ii_adj < 0: # Don't add factors connected to the fixed frame
                     continue
 
                 # Extract states for the two keyframes
@@ -350,57 +381,167 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
                 dt = imu_data['Dt'].cuda()
 
                 # --- 1. Calculate Predicted Relative Motion from BA States ---
-
                 R_i = pp.SE3(poses[:, i]).rotation()
                 R_j = pp.SE3(poses[:, j]).rotation()
-                
-                # Predicted rotation change
-                predicted_delta_r = R_i.Inv() * R_j.Inv()
-                
-                # Predicted velocity change (in body frame of i)
-                predicted_delta_v = R_i.Inv() @ (vel_j - vel_i - g * dt)
-                
-                # Predicted position change (in body frame of i)
-                # print(pose_i.translation(),vel_i )
-                predicted_delta_p = R_i.Inv() @ (
+
+                R_i_inv = R_i.Inv()
+                # Predicted rotation change, and (in body frame of i) velocity change and position change
+                predicted_delta_r = R_i_inv * R_j.Inv()
+                predicted_delta_v = R_i_inv @ (vel_j - vel_i - g * dt)
+                predicted_delta_p = R_i_inv @ (
                     pose_j.translation() - pose_i.translation() - vel_i * dt - 0.5 * g * dt**2
                 )
 
                 # --- 2. Calculate the 9-DOF IMU Residual (Error) ---
                 residual_r = (delta_r_imu.Inv() * predicted_delta_r).Log()
                 residual_v = predicted_delta_v - delta_v_imu
-                residual_p = predicted_delta_p - delta_p_imu
-
-                # --- 3. Add the IMU cost to the Gauss-Newton system ---
-                # This is a simplified approach. Instead of full Jacobians, we add
-                # the residual to the 'v' vector, which pushes the solution
-                # in the correct direction.
+                residual_p = predicted_delta_p - delta_p_imu           
                 
-                # We need to construct a 6D tangent-space error for the pose update
-                # by combining position and rotation residuals.
-                # print(residual_r)
-                pose_error_tangent = torch.cat([
-                    residual_p * imu_pos_weight, 
-                    residual_r * imu_rot_weight
-                ], dim=-1)
 
-                # # Add residual for keyframe 'i' (note the negative sign)
-                v[:, i - fixedp, 0, :, 0] -= pose_error_tangent
+                imu_residual = torch.cat([residual_r, residual_v, residual_p], dim=-1).unsqueeze(-1) # Shape (9, 1)
 
-                # # Add residual for keyframe 'j'
-                # # The error for j has the opposite effect on the combined pose
-                v[:, j - fixedp, 0, :, 0] += pose_error_tangent
+
+                # --- 3. Calculate Jacobians of the residual w.r.t. pose_i and pose_j ---
+                # This is the "expert" part. These are standard VIO Jacobians.
                 
-                # # We can also add a penalty for velocity. Since velocity is not in the
-                # # original 'B' matrix, we can add it to the 'poses_and_vels' update later,
-                # # or modify the 'block_solve' part. For now, let's focus on the pose.
+                # # Helper: skew-symmetric matrix for cross products
+                # skew_v = skew(predicted_delta_p)
+
+                # # Jacobian of the 9-dof residual w.r.t the 6-dof pose_i
+                # J_res_pose_i = torch.zeros(1, 9, 6, device=poses.device)
+                # J_res_pose_i[:, 0:3, 3:6] = -predicted_delta_r.Inv().matrix()  # d(res_r)/d(rot_i)
+                # J_res_pose_i[:, 3:6, 3:6] = skew_v                         # d(res_v)/d(rot_i)
+                # J_res_pose_i[:, 6:9, 0:3] = -I3                            # d(res_p)/d(pos_i)
+                # J_res_pose_i[:, 6:9, 3:6] = skew(R_i_inv @ (pose_j.translation() - pose_i.translation())) # d(res_p)/d(rot_i)
+
+                # # Jacobian of the 9-dof residual w.r.t the 6-dof pose_j
+                # J_res_pose_j = torch.zeros(1, 9, 6, device=poses.device)
+                # J_res_pose_j[:, 0:3, 3:6] = I3                             # d(res_r)/d(rot_j)
+                # J_res_pose_j[:, 6:9, 0:3] = R_i_inv.matrix()               # d(res_p)/d(pos_j)
+
+# ####
+#                 # Calculate Jacobians of residual w.r.t. pose_i and pose_j
+#                 J_res_pose_i = torch.zeros(9, 6, device=poses.device)
+#                 J_res_pose_i[0:3, 3:6] = -predicted_delta_r.Inv().matrix()
+#                 J_res_pose_i[3:6, 3:6] = skew(predicted_delta_v)
+#                 J_res_pose_i[6:9, 0:3] = -R_i_inv.matrix()
+#                 J_res_pose_i[6:9, 3:6] = skew(R_i_inv @ (pose_j.translation()))
+
+#                 J_res_pose_j = torch.zeros(9, 6, device=poses.device)
+#                 J_res_pose_j[0:3, 3:6] = predicted_delta_r.Inv().matrix()
+#                 J_res_pose_j[6:9, 0:3] = R_i_inv.matrix()
+
+
+#                 # --- 4. Form Hessian and Residual Contributions ---
+#                 J_i_T = J_res_pose_i.transpose(-1, -2)
+#                 J_j_T = J_res_pose_j.transpose(-1, -2)
+
+#                 # H = J.T * W * J
+#                 H_ii = J_i_T @ W_imu @ J_res_pose_i
+#                 H_ij = J_i_T @ W_imu @ J_res_pose_j
+#                 H_jj = J_j_T @ W_imu @ J_res_pose_j
+                
+#                 # r = J.T * W * e
+#                 r_i = J_i_T @ W_imu @ imu_residual
+#                 r_j = J_j_T @ W_imu @ imu_residual
+
+
+#                 # --- 5. Add Contributions Directly to the System ---
+                
+#                 # Update Hessian diagonal blocks
+#                 B[:, ii_adj, ii_adj] += H_ii.squeeze(0)
+#                 B[:, jj_adj, jj_adj] += H_jj.squeeze(0)
+
+#                 # Update Hessian off-diagonal blocks
+#                 B[:, ii_adj, jj_adj] += H_ij.squeeze(0)
+#                 B[:, jj_adj, ii_adj] += H_ij.transpose(-1, -2).squeeze(0)
+
+#                 # Update residual vector
+#                 v[:, ii_adj] -= r_i.squeeze(0)
+#                 v[:, jj_adj] -= r_j.squeeze(0)       
+# ####         
+                
+                # # --- 5. Scatter Add to the Main System ---
+                # ii_adj, jj_adj = i - fixedp, j - fixedp
+
+                # # Update Hessian diagonal blocks
+                # B = B + safe_scatter_add_mat(H_ii, torch.tensor([ii_adj]), torch.tensor([ii_adj]), n_adj, n_adj).view(b, n_adj, n_adj, 6, 6)
+                # B = B + safe_scatter_add_mat(H_jj, torch.tensor([jj_adj]), torch.tensor([jj_adj]), n_adj, n_adj).view(b, n_adj, n_adj, 6, 6)
+
+                # # Update Hessian off-diagonal blocks
+                # B = B + safe_scatter_add_mat(H_ij, torch.tensor([ii_adj]), torch.tensor([jj_adj]), n_adj, n_adj).view(b, n_adj, n_adj, 6, 6)
+                # B = B + safe_scatter_add_mat(H_ij.transpose(-1, -2), torch.tensor([jj_adj]), torch.tensor([ii_adj]), n_adj, n_adj).view(b, n_adj, n_adj, 6, 6)
+
+                # # Update residual vector
+                # v = v - safe_scatter_add_vec(r_i.squeeze(-1), torch.tensor([ii_adj]), n_adj).view(b, n_adj, 1, 6, 1)
+                # v = v - safe_scatter_add_vec(r_j.squeeze(-1), torch.tensor([jj_adj]), n_adj).view(b, n_adj, 1, 6, 1)
+
+
+                # # Form Hessian and Residual contributions
+                # J_i_T = J_res_pose_i.transpose(-1, -2)
+                # J_j_T = J_res_pose_j.transpose(-1, -2)
+
+                # H_ii = J_i_T @ W_imu @ J_res_pose_i
+                # H_ij = J_i_T @ W_imu @ J_res_pose_j
+                # H_jj = J_j_T @ W_imu @ J_res_pose_j
+                
+                # r_i = J_i_T @ W_imu @ imu_residual
+                # r_j = J_j_T @ W_imu @ imu_residual
+
+                # # Add contributions directly to the system
+                # B[:, ii_adj, ii_adj] += H_ii
+                # B[:, jj_adj, jj_adj] += H_jj
+                # B[:, ii_adj, jj_adj] += H_ij
+                # B[:, jj_adj, ii_adj] += H_ij.transpose(-1, -2)
+
+                # v_vec[:, ii_adj] -= r_i
+                # v_vec[:, jj_adj] -= r_j
+
+
+                # --- Calculate ALL Jacobians (Pose and Velocity) ---
+                J_res_pose_i, J_res_pose_j = torch.zeros(9, 6, device=poses.device), torch.zeros(9, 6, device=poses.device)
+                J_res_pose_i[0:3, 3:6] = -predicted_delta_r.Inv().matrix()
+                J_res_pose_i[3:6, 3:6] = skew(predicted_delta_v)
+                J_res_pose_i[6:9, 0:3] = -R_i_inv.matrix()
+                J_res_pose_i[6:9, 3:6] = skew(R_i_inv @ pose_j.translation())
+                J_res_pose_j[0:3, 3:6] = predicted_delta_r.Inv().matrix()
+                J_res_pose_j[6:9, 0:3] = R_i_inv.matrix()
+
+                # ** Jacobians w.r.t. Velocity **
+                J_res_vel_i, J_res_vel_j = torch.zeros(9, 3, device=poses.device), torch.zeros(9, 3, device=poses.device)
+                J_res_vel_i[3:6, 0:3] = -R_i_inv.matrix()
+                J_res_vel_i[6:9, 0:3] = -R_i_inv.matrix() * dt
+                J_res_vel_j[3:6, 0:3] = R_i_inv.matrix()
+
+                # --- Update Pose System (Hessian B and residual v_vec) ---
+                J_i_T, J_j_T = J_res_pose_i.transpose(-1, -2), J_res_pose_j.transpose(-1, -2)
+                H_ii, H_ij, H_jj = J_i_T @ W_imu @ J_res_pose_i, J_i_T @ W_imu @ J_res_pose_j, J_j_T @ W_imu @ J_res_pose_j
+                r_i, r_j = J_i_T @ W_imu @ imu_residual, J_j_T @ W_imu @ imu_residual
+                
+                B_vis[:, ii_adj, ii_adj] += H_ii
+                B_vis[:, jj_adj, jj_adj] += H_jj
+                B_vis[:, ii_adj, jj_adj] += H_ij
+                B_vis[:, jj_adj, ii_adj] += H_ij.transpose(-1, -2)
+                v_vis[:, ii_adj] -= r_i
+                v_vis[:, jj_adj] -= r_j
+
+                # ** Calculate and Store Velocity Gradients **
+                # Gradient = J.T * W * residual
+                grad_v_i = J_res_vel_i.transpose(-1, -2) @ W_imu @ imu_residual
+                grad_v_j = J_res_vel_j.transpose(-1, -2) @ W_imu @ imu_residual
+                
+                # Accumulate gradients for each velocity state
+                velocity_gradients[:,i] += grad_v_i.squeeze(-1)
+                velocity_gradients[:,j] += grad_v_j.squeeze(-1)
 
     if structure_only or n_adj == 0:
         dZ = (Q * w).view(b, -1, 1, 1)
         dX = torch.zeros(b, n_adj, 6, device=poses.device)
     else:
-        S = B - block_matmul(EQ, E.permute(0,2,1,4,3))
-        y = v - block_matmul(EQ, w.unsqueeze(dim=2))
+
+        S = B_vis - block_matmul(EQ, E.permute(0,2,1,4,3))
+        y = v_vis - block_matmul(EQ, w.unsqueeze(dim=2))
+        
         
         dX = block_solve(S, y, ep=ep, lm=1e-4)
         dZ = Q * (w - block_matmul(E.permute(0,2,1,4,3), dX).squeeze(dim=-1))
@@ -422,4 +563,6 @@ def _old_BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bou
     if velocities is None:
         return poses, patches
     else: 
+        vel_learning_rate = 0.2
+        velocities -= vel_learning_rate * velocity_gradients
         return poses, patches, velocities

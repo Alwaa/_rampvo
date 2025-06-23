@@ -27,11 +27,11 @@ from ramp.ba_pypose import BA as pp_BA
 #BundleAdjustment = fastba.BA
 
 # BundleAdjustment = pyBA
-# USE_IMU_IN_BA = True
+# USE_IMU_IN_BA = False
 # USE_VECTORIES_VER = False
 
 BundleAdjustment = pp_BA
-USE_IMU_IN_BA = False
+USE_IMU_IN_BA = True
 USE_VECTORIES_VER = False
 
 GRAVITY_BASE = torch.tensor([0, 0, -9.81])
@@ -120,6 +120,7 @@ class Ramp_vo:
         self.tlist = []
         self.counter = 0
 
+        self.scale_ = torch.tensor([1.0], device="cuda") # , requires_grad=True)
 
         self.frame_indxs_ = torch.zeros(self.N, dtype=torch.long, device="cuda")
         self.poses_ = torch.zeros(self.N, 7, dtype=torch.float, device="cuda")
@@ -571,6 +572,7 @@ class Ramp_vo:
                 self.frame_indxs_[i] = self.frame_indxs_[i + 1]
                 self.colors_[i] = self.colors_[i + 1]
                 self.poses_[i] = self.poses_[i + 1]
+                self.velocities_[i] = self.velocities_[i + 1]
                 self.patches_[i] = self.patches_[i + 1]
                 self.intrinsics_[i] = self.intrinsics_[i + 1]
 
@@ -627,6 +629,7 @@ class Ramp_vo:
             # New Viz:
             self._update_store_new_viz(delta, weight, curr_patch_centers)
         
+        print(self.scale_)
         with Timer("Update.BA", enabled=self.enable_timing):
             t0 = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
             t0 = max(t0, 1)
@@ -656,12 +659,28 @@ class Ramp_vo:
                     eff_impl=False,
                     imu_preintegrations=imu_pre,
                     imu_tensors=imu_vectorize,
-                    velocities=vel
+                    velocities=vel,
+                    scale = self.scale_,
                 )
+
+                # print("SCALE GRAD", self.scale_.grad_fn)
+
+                # loss = self.velocities.sum()
+
+                # # Try to backpropagate
+                # loss.backward()
+
+                # if self.velocities.grad is not None:
+                #     print("SUCCESS: Gradients were computed!")
+                #     print(self.velocities.grad)
+                # else:
+                #     # This will be triggered by the RuntimeError
+                #     print("FAILURE: Input gradients are None.")
             except Exception as e:
                 print(f"WARNING: BA failed...{e}")
                 raise e #TODO: REMOVE
-
+        print(self.scale_)
+        print("=============")
         # Old Viz
         self._update_store_old_viz()
 

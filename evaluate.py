@@ -558,6 +558,23 @@ def async_evaluate_sequence(
     plt.savefig("figs/traj_compare_mat.png")
     plt.close()
 
+    plt.figure(figsize=(6,6))
+    plt.plot(ref_xyz[:,0], ref_xyz[:,2], '--', label='reference')
+    plt.plot(est_xyz[:,0], est_xyz[:,2], '-',  label='estimate')
+
+    # mark start/end
+    plt.scatter(ref_xyz[0,0], ref_xyz[0,2], marker='o', s=60, label='start')
+    plt.scatter(ref_xyz[-1,0], ref_xyz[-1,2], marker='x', s=60, label='end')
+
+    plt.axis('equal')
+    plt.xlabel('x [m]')
+    plt.ylabel('y [m]')
+    plt.title('Trajectory Comparison (Xz)')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("figs/traj_side_compare_mat.png")
+    plt.close()
+
 
     print(result)
     T = result.np_arrays["alignment_transformation_sim3"]
