@@ -91,6 +91,37 @@ def block_solve(A, B, ep=1.0, lm=1e-4):
     X_flat = CholeskySolver.apply(A_flat, B_flat)
     return X_flat.reshape(b, n_blocks, 1, p, 1)
 
+def build_adjoint(pose_se3):
+    """Helper function to build the 6x6 Adjoint matrix from an SE3 LieTensor."""
+    # Get the 3x3 rotation matrix
+    R = pose_se3.rotation().matrix()
+    
+    # Get the 3x1 translation vector
+    t = pose_se3.translation()
+    
+    # The ba_pypose.py file already provides a skew() function.
+    # We use it to create the 3x3 skew-symmetric matrix of the translation.
+    t_skew = skew(t)
+
+    # Top-left 3x3 block of the Adjoint is R
+    top_left = R
+    
+    # Top-right 3x3 block is skew(t) * R
+    top_right = torch.matmul(t_skew, R)
+    
+    # Bottom-left 3x3 block is a zero matrix
+    # We get the batch dimension from R to create a compatible zero tensor
+    bottom_left = torch.zeros_like(R)
+    
+    # Bottom-right 3x3 block is R
+    bottom_right = R
+    
+    # Combine the four 3x3 blocks into a single 6x6 Adjoint matrix
+    top_row = torch.cat([top_left, top_right], dim=-1)
+    bottom_row = torch.cat([bottom_left, bottom_right], dim=-1)
+    
+    adjoint_matrix = torch.cat([top_row, bottom_row], dim=-2)
+    return adjoint_matrix
 
 # --- NEW HYBRID BUNDLE ADJUSTMENT SOLVER ---
 
@@ -111,11 +142,22 @@ def BA_hybrid(poses, velocities, patches, intrinsics, targets, weights, lmbda, i
 
     # --- Represent poses with pypose.SE3 ---
     # from raw tensor of shape (b, N, 7)
-    poses_pp = pp.SE3(poses)
+    poses_pp = pp.SE3(poses).Inv()
 
     # Use LieTorch SE3 here
     coords, v_vis, (Ji, Jj, Jz) = \
             pops.transform(SE3(poses_pp.data), patches, intrinsics, ii, jj, kk, jacobian=True)
+    
+    # ---  Convert Visual Jacobians to World Frame ---
+    # Get the Adjoint of the poses to do the transformation
+    Adj_i = build_adjoint(poses_pp[:, ii])
+    Adj_j = build_adjoint(poses_pp[:, jj])
+
+    # Transform Jacobians from local camera frame to world frame
+    # Note the shape manipulations to allow for batch matrix multiplication
+    Ji = torch.matmul(Ji, Adj_i)
+    Jj = torch.matmul(Jj, Adj_j)
+
     
     patch_size = coords.shape[3]
     r = targets - coords[..., patch_size//2, patch_size//2, :]
@@ -426,7 +468,7 @@ def BA_hybrid(poses, velocities, patches, intrinsics, targets, weights, lmbda, i
         #print(pose_update_vector.shape, update_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, 6).shape, dx_poses.shape)
 
         pose_update_vector.scatter_add_(1, update_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, 6), dx_poses)
-        poses_pp = poses_pp.Retr(pp.se3(pose_update_vector))
+        poses_pp = poses_pp.Retr(pp.se3(pose_update_vector)).Inv()
 
         # Update Velocities
         #print(velocities.shape, update_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, 3).shape, dx_vels.shape)
