@@ -2,14 +2,11 @@ import torch
 from torch_scatter import scatter_sum
 import pypose as pp
 
-# These are the original dependencies your code used
 from . import lietorch
 from .lietorch import SE3
 from . import projective_ops as pops
 
-# --- UNCHANGED UTILITY FUNCTIONS from ba_copy.py ---
-# These functions are kept as they are essential for the memory-efficient
-# block-sparse matrix assembly.
+# --- FUNCTIONS from ba_copy.py ---
 
 def skew(v):
     """
@@ -265,6 +262,7 @@ def BA_hybrid(poses, velocities, patches, intrinsics, targets, weights, lmbda, i
             res_r = (delta_r_imu.Inv() * predicted_delta_r).Log()
             res_v = predicted_delta_v - delta_v_imu
             res_p = predicted_delta_p - delta_p_imu 
+            
 
             R_i_mat = pose_i.rotation().matrix()
             R_j_mat = pose_j.rotation().matrix()
@@ -333,7 +331,7 @@ def BA_hybrid(poses, velocities, patches, intrinsics, targets, weights, lmbda, i
             i_adj, j_adj = idx_i - fixedp, idx_j - fixedp
             
             # Calculate 9-dof gradient contributions
-            # FIX: Do not transpose r_imu. (9,9).T @ (9,1) -> (9,1)
+            # (9,9).T @ (9,1) -> (9,1)
             g_i = -J_i.mT @ r_imu
             g_j = -J_j.mT @ r_imu
 
@@ -354,11 +352,12 @@ def BA_hybrid(poses, velocities, patches, intrinsics, targets, weights, lmbda, i
             H_ji = J_j.mT @ J_i
             H_jj = J_j.mT @ J_j
 
-            #Check TODO: Remove before training
+            #Check TODO: Remove
             assert not torch.isnan(H_ii).any(), f"NaN in IMU H_ii for factor {idx_i}->{idx_j}"
             assert not torch.isnan(H_ij).any(), f"NaN in IMU H_ij for factor {idx_i}->{idx_j}"
             assert not torch.isnan(H_ji).any(), f"NaN in IMU H_ji for factor {idx_i}->{idx_j}"
             assert not torch.isnan(H_jj).any(), f"NaN in IMU H_jj for factor {idx_i}->{idx_j}"
+
             B_vis9[:, i_adj, i_adj] += H_ii * factor
             B_vis9[:, i_adj, j_adj] += H_ij * factor
             B_vis9[:, j_adj, i_adj] += H_ji * factor
@@ -433,10 +432,8 @@ def BA_hybrid(poses, velocities, patches, intrinsics, targets, weights, lmbda, i
         #print(velocities.shape, update_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, 3).shape, dx_vels.shape)
         velocities.scatter_add_(1, update_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, 3), dx_vels)
 
-        # Update scale
+        # Update scale #TODO: MOVE/INITIALIZE
         scale.data += ds.squeeze()
-
-        # It's good practice to clamp scale to prevent it from becoming negative or zero
         scale.data.clamp_(min=0.1)
 
     return poses_pp.data, patches_updated, velocities
@@ -450,8 +447,6 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, it
     Handles windowing and iterations, calling the hybrid solver
     """
     
-    # --- FIX 1: Determine the actual number of poses in the graph ---
-    # This ensures we don't pass more poses than are actually being optimized.
     if ii.numel() > 0:
         n = t1
     else:
@@ -499,10 +494,7 @@ def BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, it
             scale=scale if scale is not None else torch.tensor([1.0], device=poses.device)
         )
         #t0 = 1
-        
-        # --- FIX 2: Update the full set of optimized poses ---
-        # The result `poses_updated` has shape (1, n, 7). We update the
-        # corresponding slice in the main `poses` object.
+
         poses.data[:, t0:n] = poses_updated[:, t0:n]
         velocities[:, t0:n] = velocities_updated[:, t0:n]
         patches.data[:, unique_kk_filt] = patches_updated
