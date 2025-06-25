@@ -1,12 +1,11 @@
 services:
-  test_vio:
-    image: test_vio
-    container_name: test_vio
+  test_gpu:
+    image: vio
+    container_name: vio
     build:
       context: .
       dockerfile: Dockerfile
     privileged: true
-    # user
     ipc: host
     tty: true
     network_mode: host
@@ -17,7 +16,6 @@ services:
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker.xauth:/tmp/.docker.xauth
-      # Personal locations
       - /data/storage/datasets/TartanEvent:/data/storage/datasets/TartanEvent
       - /data/storage/alexander:/data/user
     deploy:
@@ -26,4 +24,4 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu, compute]
+              capabilities: [gpu]
