@@ -23,6 +23,7 @@ Id = SE3.Identity(1, device="cuda")
 from constans import TARTAN_2_XYZ_P, TARTAN_2_XYZ_Q
 from ramp.ba import BA as pyBA
 from ramp.ba_pypose import BA as pp_BA
+from ramp.ba_stepbystep import BA as pp_BA_stepwise
 
 #BundleAdjustment = fastba.BA
 
@@ -33,6 +34,8 @@ from ramp.ba_pypose import BA as pp_BA
 BundleAdjustment = pp_BA
 USE_IMU_IN_BA = True
 USE_VECTORIES_VER = False
+
+#BundleAdjustment = pp_BA_stepwise
 
 GRAVITY_BASE = torch.tensor([0, 0, -9.81])
 

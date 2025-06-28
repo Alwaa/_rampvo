@@ -57,7 +57,6 @@ from ramp.Ramp_vo import Ramp_vo
 
 from utils.new_eval_utils import save_results, Visualizer
 
-from new_xrvio import XRVIO
 
 from config import (
     QUEUE_BUFFER_SIZE,
@@ -291,7 +290,9 @@ async def async_run(cfg_VO, network, eval_cfg, data_queue: Queue, enable_timing 
     train_cfg = eval_cfg["data_loader"]["train"]["args"]
     slam = Ramp_vo(cfg=cfg_VO, network=network, train_cfg=train_cfg, enable_timing=enable_timing)
     
-    visualizer = Visualizer() 
+    if VISUALIZATION:
+        assert False, "Test to make sure server doesnt break"
+        visualizer = Visualizer() 
 
     evaluation_iter_bar = atqdm(_queue_iterator(data_queue))
     evaluation_iter_bar.set_description("Async Evaluating")
