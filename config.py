@@ -26,6 +26,11 @@ if RAMPVO_ENV == "server":
     TARTAN_PATH_PREFIX = "/data/storage"
 
     VISUALIZATION = False #Override visualization to OFF on server
+elif RAMPVO_ENV == "colab":
+    VISUALIZATION = False #Override visualization to OFF on server
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 2
+    TARTAN_PATH_PREFIX    = "/content/drive/MyDrive/GPU"
 else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     LOADING_THREAD_TORCH_INTRA_OP_THREAD_NUM = 1
